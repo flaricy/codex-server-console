@@ -113,6 +113,31 @@ async def test_api_error_preserves_code_and_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wait_for_idle_accepts_not_loaded_history() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/status")
+        return httpx.Response(
+            200,
+            json={
+                "thread": {
+                    "id": "thread-1",
+                    "status": "notLoaded",
+                },
+                "ownership": "idle",
+                "queue": [],
+            },
+        )
+
+    async with AsyncConsoleClient(
+        token="secret",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        result = await client.wait_for_idle("thread-1", timeout=0.1)
+
+    assert result["thread"]["status"] == "notLoaded"
+
+
+@pytest.mark.asyncio
 async def test_thread_facade_sends_stable_sdk_options() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)

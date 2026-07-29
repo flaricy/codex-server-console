@@ -171,6 +171,10 @@ function selectedLabel(thread) {
   return (thread.name || thread.preview || thread.id.slice(0, 12)).slice(0, 96);
 }
 
+function isQuiescent(thread) {
+  return thread.status === "idle" || thread.status === "notLoaded";
+}
+
 function renderMessageModes(thread) {
   const select = $("#message-mode");
   const previous = select.value;
@@ -229,7 +233,21 @@ function renderMessageModes(thread) {
 function renderThreads() {
   const list = $("#thread-list");
   list.replaceChildren();
-  for (const thread of state.threads) {
+  const threads = filteredThreads();
+  $("#thread-count").textContent =
+    threads.length === state.threads.length
+      ? String(threads.length)
+      : `${threads.length}/${state.threads.length}`;
+  if (!threads.length) {
+    const empty = document.createElement("p");
+    empty.className = "thread-empty";
+    empty.textContent = state.threads.length
+      ? "No sessions match these filters."
+      : "No sessions found.";
+    list.append(empty);
+    return;
+  }
+  for (const thread of threads) {
     const button = document.createElement("button");
     button.className = `thread-card ${state.selected?.id === thread.id ? "selected" : ""}`;
     const title = document.createElement("strong");
@@ -246,6 +264,39 @@ function renderThreads() {
     });
     list.append(button);
   }
+}
+
+function filteredThreads() {
+  const query = $("#thread-search").value.trim().toLocaleLowerCase();
+  const scope = $("#thread-scope").value;
+  return state.threads
+    .filter((thread) => {
+      if (scope === "workspace" && thread.controllable === false) return false;
+      if (scope === "created" && !thread.created_here) return false;
+      if (!query) return true;
+      return [
+        thread.name,
+        thread.preview,
+        thread.id,
+        thread.cwd,
+      ].some((value) =>
+        String(value || "").toLocaleLowerCase().includes(query),
+      );
+    })
+    .sort((left, right) => {
+      const rank = (thread) => {
+        const controllable = thread.controllable !== false;
+        const active =
+          thread.ownership !== "idle" || thread.status === "active";
+        if (controllable && active) return 0;
+        if (controllable) return 1;
+        if (active) return 2;
+        return 3;
+      };
+      const rankDifference = rank(left) - rank(right);
+      if (rankDifference) return rankDifference;
+      return Number(right.updated_at || 0) - Number(left.updated_at || 0);
+    });
 }
 
 function setInspector(name) {
@@ -375,11 +426,34 @@ function selectThread(thread) {
     !controllable ||
     (
       !thread.archived &&
-      (thread.ownership !== "idle" || thread.status !== "idle")
+      (thread.ownership !== "idle" || !isQuiescent(thread))
     );
   $("#archive-thread").textContent = thread.archived ? "Restore" : "Archive";
   renderMessageModes(thread);
   renderThreads();
+}
+
+function clearThreadSelection() {
+  state.selected = null;
+  $("#selected-title").textContent = "No thread selected";
+  $("#ownership").textContent = "idle";
+  $("#attach").disabled = true;
+  $("#interrupt-turn").disabled = true;
+  $("#archive-thread").disabled = true;
+  const mode = $("#message-mode");
+  mode.replaceChildren();
+  const option = document.createElement("option");
+  option.value = "unavailable";
+  option.textContent = "Select a thread to send a message";
+  mode.append(option);
+  mode.disabled = true;
+  $("#message").disabled = true;
+  $("#submit-message").disabled = true;
+  for (const field of $("#turn-options").querySelectorAll(
+    "input, select, textarea",
+  )) {
+    field.disabled = true;
+  }
 }
 
 async function chooseThread(thread) {
@@ -394,6 +468,26 @@ async function chooseThread(thread) {
   await refreshQueue();
 }
 
+async function applyScopeFilter() {
+  const visible = filteredThreads();
+  if (
+    state.selected &&
+    !visible.some((thread) => thread.id === state.selected.id)
+  ) {
+    if (visible.length) {
+      await chooseThread(visible[0]);
+    } else {
+      state.terminalGeneration += 1;
+      await disconnectTerminal();
+      clearThreadSelection();
+      await refreshQueue();
+    }
+  } else if (!state.selected && visible.length) {
+    await chooseThread(visible[0]);
+  }
+  renderThreads();
+}
+
 async function refresh() {
   if (state.refreshing) {
     state.refreshPending = true;
@@ -402,9 +496,8 @@ async function refresh() {
   state.refreshing = true;
   try {
     const archived = $("#archived").checked;
-    const createdHere = $("#created-here").checked;
     const payload = await api(
-      `/api/snapshot?archived=${archived}&created_here=${createdHere}`,
+      `/api/snapshot?archived=${archived}`,
     );
     state.lastEventId = Math.max(state.lastEventId, payload.event_id || 0);
     state.threads = payload.threads;
@@ -414,18 +507,19 @@ async function refresh() {
       else {
         state.terminalGeneration += 1;
         await disconnectTerminal();
-        state.selected = null;
-        $("#selected-title").textContent = "No thread selected";
+        clearThreadSelection();
         setTerminalStatus("Disconnected");
-        $("#attach").disabled = true;
-        $("#interrupt-turn").disabled = true;
-        $("#archive-thread").disabled = true;
       }
     } else if (state.threads.length) {
+      const visible = filteredThreads();
       selectThread(
-        state.threads.find((thread) => thread.controllable !== false) ||
+        visible.find((thread) => thread.controllable !== false) ||
+          visible[0] ||
+          state.threads.find((thread) => thread.controllable !== false) ||
           state.threads[0],
       );
+    } else {
+      clearThreadSelection();
     }
     renderThreads();
     await refreshQueue();
@@ -446,7 +540,10 @@ async function waitForIdle(threadId, timeoutMs = 10000) {
     const status = await api(`/api/threads/${threadId}/status`);
     if (
       status.ownership === "idle" &&
-      status.thread?.status === "idle"
+      (
+        status.thread?.status === "idle" ||
+        status.thread?.status === "notLoaded"
+      )
     ) {
       return;
     }
@@ -748,7 +845,10 @@ $("#submit-message").addEventListener("click", async () => {
 
 $("#refresh").addEventListener("click", refresh);
 $("#archived").addEventListener("change", refresh);
-$("#created-here").addEventListener("change", refresh);
+$("#thread-search").addEventListener("input", renderThreads);
+$("#thread-scope").addEventListener("change", () => {
+  void applyScopeFilter();
+});
 $("#show-activity").addEventListener("click", () => setInspector("activity"));
 $("#show-queue").addEventListener("click", () => setInspector("queue"));
 $("#clear-log").addEventListener("click", () => {
@@ -841,5 +941,6 @@ window.setInterval(() => {
   }
 }, 1500);
 
+clearThreadSelection();
 refresh();
 connectEvents();

@@ -40,8 +40,41 @@ aside, .workspace { min-height: 0; background: var(--panel); }
   display: flex; align-items: center; justify-content: space-between;
   font-weight: 650; margin-bottom: 10px;
 }
+.panel-title small {
+  color: var(--muted);
+  font: 10px ui-monospace, monospace;
+  margin-left: 4px;
+}
 .icon { padding: 3px 8px; font-size: 17px; }
-.toggle { display: block; color: var(--muted); font-size: 11px; margin-bottom: 9px; }
+.thread-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+.thread-filters input[type="search"],
+.thread-filters select {
+  min-width: 0;
+  color: #dbeafe;
+  background: #0e1115;
+  border: 1px solid #303844;
+  border-radius: 5px;
+  padding: 6px 7px;
+  font-size: 11px;
+}
+.thread-filters input[type="search"] { grid-column: 1 / -1; }
+.toggle {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.thread-empty {
+  color: #64748b;
+  font: 10px/1.5 ui-monospace, monospace;
+  padding: 8px 3px;
+}
 .thread-card {
   display: flex; flex-direction: column; align-items: flex-start; width: 100%;
   text-align: left; margin-bottom: 7px; padding: 10px; background: #151a20;

@@ -17,6 +17,9 @@ from .config import default_data_dir
 from .turns import TurnOptions, normalize_turn_options
 
 
+_QUIESCENT_THREAD_STATUSES = frozenset({"idle", "notLoaded"})
+
+
 class ConsoleAPIError(RuntimeError):
     def __init__(
         self,
@@ -408,7 +411,7 @@ class AsyncConsoleClient:
             if (
                 current.get("ownership") == "idle"
                 and isinstance(thread, dict)
-                and thread.get("status") == "idle"
+                and thread.get("status") in _QUIESCENT_THREAD_STATUSES
             ):
                 return current
             if time.monotonic() >= deadline:

@@ -39,6 +39,28 @@ async def test_send_steer_complete(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_not_loaded_threads_are_quiescent_and_load_on_demand(
+    tmp_path,
+) -> None:
+    manager, adapter = make_manager(tmp_path)
+    send_thread = await manager.create_thread(None, "send")
+    archive_thread = await manager.create_thread(None, "archive")
+    adapter.rows[send_thread["id"]]["status"] = "notLoaded"
+    adapter.rows[archive_thread["id"]]["status"] = "notLoaded"
+
+    started = await manager.send(send_thread["id"], "load and work")
+    archived = await manager.archive(archive_thread["id"])
+
+    assert started["state"] == "running"
+    assert archived["archived"] is True
+    assert manager.store.get_managed(archive_thread["id"])["archived"] == 1
+    adapter.turns[0].done.set()
+    await asyncio.wait_for(manager._tasks[send_thread["id"]], timeout=1)
+    await manager.shutdown()
+    manager.store.close()
+
+
+@pytest.mark.asyncio
 async def test_turn_options_reach_sdk_and_keep_cwd_inside_workspace(
     tmp_path,
 ) -> None:

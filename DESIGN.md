@@ -252,6 +252,10 @@ two PTYs alive or mixing stale output into the current xterm.
 
 - Selecting a thread only changes the debugger selection. Attaching is explicit
   and runs `codex --remote ... resume THREAD`.
+- One searchable list presents all app-server history. Scope filters distinguish
+  controllable workspace sessions and application-created metadata without
+  inventing separate local/non-local loading paths.
+- `notLoaded` is a quiescent dormant state and is resumed on demand.
 - The TUI always remains visible while SDK turns run.
 - While idle, the composer offers typed SDK `send` and durable `queue`.
 - During any app-server active turn, it offers `steer` and `queue`.

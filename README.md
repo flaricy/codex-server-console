@@ -231,6 +231,10 @@ official SDK exposes that contract.
   `thread/delete` and permanently removes the session and its local queue state.
 - The default list is the authoritative thread domain of the shared app-server.
   “Created here” is optional metadata and a filter, not a different session type.
+- The sidebar has one session list with text search and explicit `All history`,
+  `This workspace`, and `Created here` scopes. `notLoaded` means dormant history,
+  not a different kind of local/non-local session; the backend safely resumes it
+  on the first control operation.
 - History outside the configured workspace remains visible for debugging but is
   explicitly marked `inspect only`. Every mutation and CLI attachment is rejected
   server-side with HTTP 403. Start the server with a broader workspace root only

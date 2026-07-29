@@ -7,6 +7,10 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Cpath d='M9 10h14v3H12v6h11v3H9z' fill='%2367e8f9'/%3E%3C/svg%3E"
+    />
     <title>Codex Thread Console</title>
   </head>
   <body>
@@ -22,14 +26,29 @@
       <main>
         <aside class="threads">
           <div class="panel-title">
-            <span>Threads</span>
+            <span>Threads <small id="thread-count">0</small></span>
             <div>
               <button id="refresh" class="icon" title="Refresh">↻</button>
               <button id="new-thread">New</button>
             </div>
           </div>
-          <label class="toggle"><input id="archived" type="checkbox" /> Show archived</label>
-          <label class="toggle"><input id="created-here" type="checkbox" /> Created here only</label>
+          <div class="thread-filters">
+            <input
+              id="thread-search"
+              type="search"
+              placeholder="Search sessions"
+              aria-label="Search sessions"
+            />
+            <select id="thread-scope" aria-label="Session scope">
+              <option value="all">All history</option>
+              <option value="workspace">This workspace</option>
+              <option value="created">Created here</option>
+            </select>
+            <label class="toggle">
+              <input id="archived" type="checkbox" />
+              Archived
+            </label>
+          </div>
           <div id="thread-list"></div>
         </aside>
 
@@ -54,7 +73,12 @@
               <option value="send">Start turn through shared app-server</option>
               <option value="queue">Queue through atomic backend</option>
             </select>
-            <textarea id="message" rows="2" placeholder="Message for the selected thread"></textarea>
+            <textarea
+              id="message"
+              rows="2"
+              placeholder="Message for the selected thread"
+              disabled
+            ></textarea>
             <button id="submit-message" disabled>Submit</button>
             <details id="turn-options" class="turn-options">
               <summary>Turn options <span>send / queue only</span></summary>

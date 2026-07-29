@@ -15,6 +15,9 @@ from .store import QueueStore
 from .turns import TurnOptions, normalize_turn_options
 
 
+QUIESCENT_THREAD_STATUSES = frozenset({"idle", "notLoaded"})
+
+
 class Ownership(str, Enum):
     idle = "idle"
     sdk_turn = "sdk_turn"
@@ -614,7 +617,7 @@ class ThreadManager:
         self, thread_id: str, action: str
     ) -> dict[str, Any]:
         metadata = await self.adapter.read_thread(thread_id)
-        if metadata["status"] != "idle":
+        if metadata["status"] not in QUIESCENT_THREAD_STATUSES:
             raise ConflictError(
                 "external_turn_active",
                 f"cannot {action}: Codex thread is {metadata['status']}",
@@ -623,7 +626,7 @@ class ThreadManager:
 
     async def _ensure_sdk_quiescent(self, thread_id: str) -> dict[str, Any]:
         metadata = await self.adapter.read_thread(thread_id)
-        if metadata["status"] != "idle":
+        if metadata["status"] not in QUIESCENT_THREAD_STATUSES:
             self._ownership[thread_id] = Ownership.reconciling
             self._schedule_dispatch_retry(thread_id)
             raise ConflictError(
@@ -685,7 +688,7 @@ class ThreadManager:
                     thread_id, body, turn_options
                 )
             metadata = await self.adapter.read_thread(thread_id)
-            if metadata["status"] != "idle":
+            if metadata["status"] not in QUIESCENT_THREAD_STATUSES:
                 self._ownership[thread_id] = Ownership.reconciling
                 self._schedule_dispatch_retry(thread_id)
                 return self._enqueue_deferred_send(
@@ -868,7 +871,7 @@ class ThreadManager:
                 except BaseException:
                     self._schedule_dispatch_retry(thread_id)
                     return
-                if metadata["status"] != "idle":
+                if metadata["status"] not in QUIESCENT_THREAD_STATUSES:
                     self._schedule_dispatch_retry(thread_id)
                     return
                 self._ownership[thread_id] = Ownership.idle
