@@ -27,7 +27,11 @@ def test_cookie_and_header_auth(tmp_path) -> None:
     with TestClient(app, base_url="http://127.0.0.1:8765") as client:
         assert client.get("/api/health").status_code == 401
         root = client.get("/")
-        assert root.status_code == 200
+        # The Python-only CI job intentionally doesn't build ignored Web
+        # assets; the separate Web job owns that verification. The index
+        # still establishes the browser session in either state.
+        assert root.status_code in {200, 503}
+        assert client.cookies.get("codex_console_session") == "secret"
         assert client.get("/api/health").status_code == 200
 
         other = TestClient(app, base_url="http://127.0.0.1:8765")
