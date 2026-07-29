@@ -1,0 +1,207 @@
+# Codex Thread Console
+
+A local experiment built with the official Codex Python SDK. It combines:
+
+- a FastAPI control server;
+- a durable application-owned FIFO message queue;
+- a shell-like HTTP client;
+- a browser UI with the actual Codex TUI rendered through xterm.js and a PTY.
+
+Read [DESIGN.md](./DESIGN.md) for the state machine, crash semantics, security
+boundary, and the independent design critique that shaped the implementation.
+
+## Install
+
+Requirements: macOS or Linux, Python 3.10+, Node.js, and an existing Codex login.
+The Python SDK automatically reuses the local Codex authentication.
+
+```bash
+cd experiments/codex-thread-console
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[test]'
+
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+The controller library is pinned to `openai-codex==0.144.4`, but the app-server
+and remote TUI use the user's currently installed `codex` binary. That binary owns
+and migrates the global `~/.codex` state database, so using an older SDK-bundled
+CLI against a database already migrated by a newer Codex release is unsafe.
+
+Resolution order is:
+
+1. `CODEX_CONSOLE_CODEX_BIN`, when explicitly set;
+2. `codex` from `PATH`;
+3. the ChatGPT app's Codex binary on macOS;
+4. the SDK-bundled binary only as a last fallback.
+
+`GET /api/health` reports the selected binary, source, and version.
+
+## Run
+
+Choose the directory tree that new threads may use, then start one server process:
+
+```bash
+cd experiments/codex-thread-console
+export CODEX_CONSOLE_WORKSPACE_ROOT=/absolute/path/to/your/workspace
+.venv/bin/codex-thread-console-server
+```
+
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
+
+Only loopback binding and one server worker are supported. Runtime state is stored
+under this experiment's `.data/` directory and ignored by Git. Override it with
+`CODEX_CONSOLE_DATA_DIR` when needed.
+
+The server starts one child `codex app-server` on a dynamic loopback endpoint.
+Both the Python SDK proxy and every Web TUI connect to that same process.
+
+## Architecture
+
+There is exactly one long-running `codex app-server`. It is the authoritative
+owner of Codex threads and turns:
+
+```text
+Shell REPL ── persistent HTTP ─┐
+                              │
+Web controls ───── HTTP ──────┼──> FastAPI
+                              │      ├─ per-thread FIFO mutation sequencer
+                              │      ├─ SQLite durable prompt queue
+                              │      └─ Python SDK
+                              │             │ stdio
+                              │             v
+                              │        stdio↔WebSocket proxy ──┐
+                              │                                │
+Browser xterm <─ WebSocket <──┴── PTY: codex --remote ... ────┤
+                                                               v
+                                                    one Codex app-server
+```
+
+The two paths serve different purposes:
+
+- typed control operations (`send`, `steer`, `queue`, `interrupt`, and thread
+  management) go through FastAPI, a FIFO sequencer, and the official Python SDK;
+- the browser terminal is the real Codex CLI. FastAPI starts it in a PTY with
+  `codex --remote <shared-endpoint> resume <thread>` and forwards raw terminal
+  bytes to xterm.js.
+
+The SDK normally starts its own stdio app-server. Here, a small
+stdio↔WebSocket proxy redirects it to the same backend-owned app-server used by
+every remote TUI. This is what lets a prompt sent from the shell or Web controls
+appear in the attached Codex TUI.
+
+Codex app-server state is authoritative. SQLite stores only application-owned
+queue and console metadata. FastAPI serializes mutations FIFO per thread, while
+different threads may run concurrently. Browser-to-PTY traffic remains genuine
+interactive CLI traffic and meets SDK traffic at the shared app-server.
+
+## Shared app-server demo
+
+Keep the server and browser open. In another terminal:
+
+```bash
+cd experiments/codex-thread-console
+.venv/bin/codex-thread-console thread create --name shared-demo
+.venv/bin/codex-thread-console message send shared-demo \
+  "Run sleep 30, then summarize what happened."
+```
+
+Select `shared-demo` in the browser. The SDK prompt and live turn state appear in
+the real Codex TUI. While it is running, use the Web composer to steer it or click
+**Interrupt**. The Activity panel and shell responses include
+`mutation_sequence`, showing the per-thread commit order.
+
+Two concurrent `message send` calls are deterministic: the first starts and the
+second is stored in the durable FIFO queue. An earlier queued or retried message
+also cannot be overtaken by a later `send`.
+
+## Shell client
+
+Run one command:
+
+```bash
+.venv/bin/codex-thread-console thread list
+.venv/bin/codex-thread-console thread list --all-local
+.venv/bin/codex-thread-console thread create --name "demo"
+.venv/bin/codex-thread-console thread archive demo
+.venv/bin/codex-thread-console message queue demo "Inspect the repository"
+.venv/bin/codex-thread-console message steer demo "Focus on correctness"
+.venv/bin/codex-thread-console message interrupt demo
+.venv/bin/codex-thread-console thread delete demo
+```
+
+Or enter the interactive REPL:
+
+```bash
+.venv/bin/codex-thread-console
+```
+
+The client opens and authenticates a TCP connection before showing the prompt.
+If the server is unavailable it exits with a clear error instead of entering a
+disconnected shell. The REPL supports terminal line editing, including arrow
+keys, Home/End, deletion, and command history for the current process.
+
+The client reads the short-lived server token from the protected runtime data
+directory. Set the same `CODEX_CONSOLE_WORKSPACE_ROOT` in the server and client
+shells.
+
+## Important semantics
+
+- `thread archive` is reversible. `thread delete` calls app-server
+  `thread/delete` and permanently removes the session and its local queue state.
+- The default list contains only threads created through this console. Use
+  `thread list --all-local` or the explicit UI checkbox to inspect unrelated local
+  Codex history.
+- The backend starts one loopback `codex app-server` process. The Python SDK connects
+  through a stdio↔WebSocket proxy; every browser TUI uses
+  `codex --remote <same-endpoint>`. No component starts a second app-server.
+- Selecting a thread launches its real remote Codex TUI. A turn started by the shell
+  controller or Web composer is therefore rendered live in that TUI.
+- The Web composer uses typed operations through the backend: `send` while idle,
+  `steer` during any active turn, and durable `queue`. The controller resolves the
+  authoritative active `turnId`, so steer/interrupt also work for turns started by
+  the TUI rather than this server.
+- Detaching the last PTY interrupts a TUI-originated turn before killing the remote
+  CLI. Ctrl+C server shutdown interrupts active managed turns before stopping the
+  shared app-server, preventing persisted orphan `inProgress` turns.
+- The browser waits for an explicit `terminal_ready` frame before accepting composer
+  input. PTY input with an id is acknowledged only after its complete byte sequence
+  is written.
+- Backend mutations are assigned a monotonically increasing `mutation_sequence` and
+  executed FIFO per thread. Different threads can progress concurrently. Direct TUI
+  requests and SDK requests meet at the single app-server, which is the final
+  thread-state authority.
+- Queue ordering is FIFO during normal operation. SQLite and Codex cannot share an
+  atomic transaction, so a crash during `turn/start` produces `indeterminate`, never
+  an automatic replay. Use `queue retry ID` or `queue cancel ID` explicitly.
+- Background SDK turns use `deny_all` approvals and a read-only sandbox. Interactive
+  approvals appear only inside the attached Codex TUI.
+- The loopback app-server endpoint is created at startup, recorded in the protected
+  runtime directory, and removed when the console shuts down.
+
+## Known startup display issue
+
+Immediately after a cold server start, rapidly auto-attaching multiple threads can
+leave a later remote TUI showing a stale `Working` indicator even though
+`thread status` reports `idle`. The first attachment may show `Working` briefly;
+the second can remain stale. Refreshing the page rebuilds the remote PTYs and has
+cleared the issue in the verified environment.
+
+This is a terminal-client display inconsistency, not evidence that a model turn is
+still running. Treat the app-server status returned by `thread status THREAD` as
+authoritative. A fresh native `codex --remote ... resume` against the same idle
+thread was verified to open normally, so rebuilding the stale remote PTY is a
+valid recovery while startup attachment synchronization is being improved.
+
+## Test
+
+```bash
+PYTHONPATH=src .venv/bin/pytest -q
+cd frontend && npm audit --omit=dev && npm run build
+```
+
+The automated suite uses a fake Codex adapter and does not consume model usage. The
+manual live smoke test is described in [DESIGN.md](./DESIGN.md).

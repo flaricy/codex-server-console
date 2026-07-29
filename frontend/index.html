@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>Codex Thread Console</title>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <div>
+          <span class="eyebrow">LOCAL CONTROL SURFACE</span>
+          <h1>Codex Thread Console</h1>
+        </div>
+        <div class="policy">one shared app-server · per-thread FIFO</div>
+      </header>
+
+      <section class="command-bar">
+        <span class="prompt">›</span>
+        <input id="command" autocomplete="off" spellcheck="false" placeholder="thread list · message queue THREAD &quot;your message&quot;" />
+        <button id="run-command">Run</button>
+      </section>
+
+      <main>
+        <aside class="threads">
+          <div class="panel-title">
+            <span>Threads</span>
+            <div>
+              <button id="refresh" class="icon" title="Refresh">↻</button>
+              <button id="new-thread">New</button>
+            </div>
+          </div>
+          <label class="toggle"><input id="archived" type="checkbox" /> Show archived</label>
+          <label class="toggle"><input id="include-all" type="checkbox" /> Include all local Codex history</label>
+          <div id="thread-list"></div>
+        </aside>
+
+        <section class="workspace">
+          <div class="terminal-toolbar">
+            <div>
+              <span id="selected-title">No thread selected</span>
+              <span id="ownership" class="badge">idle</span>
+              <span id="terminal-status" class="terminal-status">Disconnected</span>
+            </div>
+            <div>
+              <button id="archive-thread" disabled>Archive</button>
+              <button id="interrupt-turn" disabled>Interrupt</button>
+              <button id="attach" disabled>Attach CLI</button>
+            </div>
+          </div>
+          <div id="terminal-frame">
+            <div id="terminal"></div>
+          </div>
+          <div class="composer">
+            <select id="message-mode" disabled>
+              <option value="send">Start turn through shared app-server</option>
+              <option value="queue">Queue through atomic backend</option>
+            </select>
+            <textarea id="message" rows="2" placeholder="Message for the selected thread"></textarea>
+            <button id="submit-message" disabled>Submit</button>
+          </div>
+        </section>
+
+        <aside class="activity">
+          <div class="panel-title"><span>Activity</span><button id="clear-log" class="icon">×</button></div>
+          <pre id="log"></pre>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
