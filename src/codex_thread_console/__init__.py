@@ -3,6 +3,7 @@
 from .client import (
     AsyncConsoleClient,
     ConsoleAPIError,
+    EventStreamGapError,
     TurnFailedError,
     TurnOutcome,
 )
@@ -10,6 +11,7 @@ from .client import (
 __all__ = [
     "AsyncConsoleClient",
     "ConsoleAPIError",
+    "EventStreamGapError",
     "TurnFailedError",
     "TurnOutcome",
 ]

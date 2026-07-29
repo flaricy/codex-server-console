@@ -33,6 +33,10 @@ class TurnFailedError(ConsoleAPIError):
     pass
 
 
+class EventStreamGapError(ConsoleAPIError):
+    """The turn completed, but its final event fell outside the replay window."""
+
+
 @dataclass(frozen=True, slots=True)
 class TurnOutcome:
     thread_id: str
@@ -183,6 +187,18 @@ class AsyncConsoleClient:
         )
         return list(payload.get("threads", []))
 
+    async def snapshot(
+        self,
+        *,
+        archived: bool = False,
+        created_here: bool = False,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            "/api/snapshot",
+            params={"archived": archived, "created_here": created_here},
+        )
+
     async def create_thread(
         self,
         *,
@@ -242,14 +258,17 @@ class AsyncConsoleClient:
             "DELETE", f"/api/threads/{thread_id}"
         )
 
-    @property
-    def _event_url(self) -> str:
+    def _event_url(self, since_event_id: int | None = None) -> str:
         return urlunsplit(
             (
                 "ws",
                 self._parsed_url.netloc,
                 f"{self._parsed_url.path.rstrip('/')}/ws/events",
-                "",
+                (
+                    f"since={since_event_id}"
+                    if since_event_id is not None
+                    else ""
+                ),
                 "",
             )
         )
@@ -267,9 +286,11 @@ class AsyncConsoleClient:
         )
 
     @asynccontextmanager
-    async def _event_connection(self) -> AsyncIterator[Any]:
+    async def _event_connection(
+        self, since_event_id: int | None = None
+    ) -> AsyncIterator[Any]:
         async with websockets.connect(
-            self._event_url,
+            self._event_url(since_event_id),
             origin=self._origin,
             additional_headers={"X-Console-Token": self._load_token()},
             open_timeout=self._timeout,
@@ -277,14 +298,22 @@ class AsyncConsoleClient:
             yield socket
 
     async def events(
-        self, *, thread_id: str | None = None
+        self,
+        *,
+        thread_id: str | None = None,
+        since_event_id: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        async with self._event_connection() as socket:
+        async with self._event_connection(since_event_id) as socket:
             while True:
                 event = json.loads(await socket.recv())
                 if event.get("type") == "heartbeat":
                     continue
-                if thread_id is None or _event_thread_id(event) == thread_id:
+                if (
+                    event.get("type")
+                    in {"event_stream_ready", "resync_required"}
+                    or thread_id is None
+                    or _event_thread_id(event) == thread_id
+                ):
                     yield event
 
     async def wait_for_idle(
@@ -333,14 +362,14 @@ class AsyncConsoleClient:
                     event_type = event.get("type")
                     if event_type == "heartbeat":
                         continue
+                    if event_type == "event_stream_ready":
+                        continue
                     if event_type == "resync_required":
                         await self.wait_for_idle(thread_id, timeout=timeout)
-                        return TurnOutcome(
-                            thread_id,
-                            str(target_turn or "unknown"),
-                            None,
-                            None,
-                            int(target_queue) if target_queue is not None else None,
+                        raise EventStreamGapError(
+                            "turn became idle after an event-stream gap; "
+                            "the final response cannot be recovered safely",
+                            code="event_stream_gap",
                         )
                     if _event_thread_id(event) != thread_id:
                         continue

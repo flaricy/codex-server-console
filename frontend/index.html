@@ -60,8 +60,14 @@
         </section>
 
         <aside class="activity">
-          <div class="panel-title"><span>Activity</span><button id="clear-log" class="icon">×</button></div>
-          <pre id="log"></pre>
+          <div class="panel-title">
+            <span>Activity</span>
+            <div class="activity-controls">
+              <span id="event-status" class="event-status">Connecting</span>
+              <button id="clear-log" class="icon" title="Clear activity">×</button>
+            </div>
+          </div>
+          <div id="activity-list" role="log" aria-live="polite"></div>
         </aside>
       </main>
     </div>

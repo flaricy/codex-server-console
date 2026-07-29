@@ -82,6 +82,52 @@ def test_thread_history_is_default_and_created_here_is_a_filter(tmp_path) -> Non
         )
 
 
+def test_snapshot_cursor_and_event_replay(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    data = tmp_path / "data"
+    settings = Settings(workspace, data, port=8765, session_token="secret")
+    adapter = FakeAdapter(workspace)
+    adapter.rows["external-thread"] = {
+        "id": "external-thread",
+        "name": "external",
+        "preview": "",
+        "cwd": str(workspace),
+        "status": "idle",
+        "archived": False,
+    }
+    app = create_app(settings=settings, adapter=adapter)
+
+    with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+        client.get("/")
+        snapshot = client.get("/api/snapshot").json()
+        assert snapshot["event_id"] == 0
+        assert [row["id"] for row in snapshot["threads"]] == [
+            "external-thread"
+        ]
+
+        app.state.manager.events.publish(
+            {"type": "thread_changed", "thread_id": "external-thread"}
+        )
+        with client.websocket_connect(
+            "/ws/events?since=0",
+            headers={
+                "Origin": "http://127.0.0.1:8765",
+                "Host": "127.0.0.1:8765",
+                "X-Console-Token": "secret",
+            },
+        ) as websocket:
+            replay = websocket.receive_json()
+            ready = websocket.receive_json()
+
+        assert replay["type"] == "thread_changed"
+        assert replay["event_id"] == 1
+        assert ready == {
+            "type": "event_stream_ready",
+            "latest_event_id": 1,
+        }
+
+
 def test_archive_and_delete_have_distinct_semantics(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

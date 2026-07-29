@@ -217,6 +217,20 @@ def create_app(
             )
         }
 
+    @app.get("/api/snapshot", dependencies=[Depends(require_auth)])
+    async def snapshot(
+        archived: bool = False,
+        created_here: bool = False,
+        manager: ThreadManager = Depends(get_manager),
+    ) -> dict[str, object]:
+        # Capture the cursor first. Events emitted while the thread list is
+        # loading are replayed when the client connects with this event ID.
+        event_id = manager.events.latest_event_id
+        threads = await manager.list_threads(
+            archived, created_here_only=created_here
+        )
+        return {"event_id": event_id, "threads": threads}
+
     @app.post("/api/threads", dependencies=[Depends(require_auth)])
     async def create_thread(
         body: ThreadCreate,
@@ -361,9 +375,17 @@ def create_app(
     async def event_socket(websocket: WebSocket) -> None:
         if not await authenticate_websocket(websocket):
             return
+        since_raw = websocket.query_params.get("since")
+        try:
+            since_event_id = int(since_raw) if since_raw is not None else None
+            if since_event_id is not None and since_event_id < 0:
+                raise ValueError
+        except ValueError:
+            await websocket.close(code=4400)
+            return
         await websocket.accept()
         manager: ThreadManager = websocket.app.state.manager
-        async with manager.events.subscribe() as queue:
+        async with manager.events.subscribe(since_event_id) as queue:
             try:
                 async def send_events() -> None:
                     while True:

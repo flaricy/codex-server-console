@@ -177,11 +177,18 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`events(thread_id=...)` exposes the normalized lifecycle stream for reactive
-workflows. `send_and_wait` subscribes before starting the turn, follows a queued
-message into its eventual turn, and returns its final response. This keeps the
-official Python SDK and app-server authority inside one backend while allowing
-independent Python workflow processes.
+`snapshot()` returns the current thread view plus an `event_id`.
+`events(thread_id=..., since_event_id=...)` exposes the normalized lifecycle
+stream and replays events from that cursor after a disconnect. If the bounded
+replay window was exceeded, it yields `resync_required` so the workflow can take
+a new snapshot instead of silently operating on stale state.
+
+`send_and_wait` subscribes before starting the turn, follows a queued message into
+its eventual turn, and returns its final response. If event loss makes that final
+response unknowable, it raises `EventStreamGapError` after the thread is confirmed
+idle rather than returning a false success. This keeps the official Python SDK
+and app-server authority inside one backend while allowing independent Python
+workflow processes.
 
 ## Important semantics
 
@@ -192,6 +199,9 @@ independent Python workflow processes.
 - The backend starts one loopback `codex app-server` process. The Python SDK connects
   through a stdio↔WebSocket proxy; every browser TUI uses
   `codex --remote <same-endpoint>`. No component starts a second app-server.
+- The debugger loads a REST snapshot before consuming ordered WebSocket deltas.
+  Each event has a monotonic `event_id`; reconnects replay a bounded in-memory
+  window and explicitly request a new snapshot if continuity cannot be proven.
 - Selecting a thread is read-only and does not launch a process. **Attach CLI**
   explicitly launches its real remote Codex TUI. A turn started by the shell
   controller or Web composer is rendered live after attachment.

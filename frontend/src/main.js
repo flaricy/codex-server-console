@@ -15,16 +15,60 @@ const state = {
   eventsSocket: null,
   eventsReconnectTimer: null,
   eventsReconnectAttempt: 0,
+  eventProcessing: Promise.resolve(),
+  lastEventId: 0,
+  refreshTimer: null,
   refreshing: false,
+  refreshPending: false,
 };
 
 const $ = (selector) => document.querySelector(selector);
-const logElement = $("#log");
+const activityElement = $("#activity-list");
 
-function log(label, value = "") {
-  const timestamp = new Date().toLocaleTimeString();
-  const rendered = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  logElement.textContent = `[${timestamp}] ${label}${rendered ? `\n${rendered}` : ""}\n\n${logElement.textContent}`;
+function log(label, value = "", level = "info") {
+  const item = document.createElement("article");
+  item.className = `activity-item ${level}`;
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  title.textContent = label;
+  const time = document.createElement("time");
+  time.dateTime = new Date().toISOString();
+  time.textContent = new Date().toLocaleTimeString();
+  header.append(title, time);
+  item.append(header);
+  if (value !== "" && value !== undefined) {
+    const detail = document.createElement("pre");
+    detail.textContent =
+      typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    item.append(detail);
+  }
+  activityElement.prepend(item);
+  while (activityElement.children.length > 200) {
+    activityElement.lastElementChild.remove();
+  }
+}
+
+function setEventStatus(label, stateName = "") {
+  const status = $("#event-status");
+  status.textContent = label;
+  status.className = `event-status ${stateName}`.trim();
+}
+
+function eventLabel(event) {
+  const subject =
+    event.thread_id ||
+    event.thread?.id ||
+    event.item?.thread_id ||
+    "";
+  return `${event.type}${subject ? ` · ${String(subject).slice(0, 12)}` : ""}`;
+}
+
+function scheduleRefresh() {
+  if (state.refreshTimer !== null) return;
+  state.refreshTimer = window.setTimeout(() => {
+    state.refreshTimer = null;
+    void refresh();
+  }, 80);
 }
 
 async function api(path, options = {}) {
@@ -211,14 +255,18 @@ async function chooseThread(thread) {
 }
 
 async function refresh() {
-  if (state.refreshing) return;
+  if (state.refreshing) {
+    state.refreshPending = true;
+    return;
+  }
   state.refreshing = true;
   try {
     const archived = $("#archived").checked;
     const createdHere = $("#created-here").checked;
     const payload = await api(
-      `/api/threads?archived=${archived}&created_here=${createdHere}`,
+      `/api/snapshot?archived=${archived}&created_here=${createdHere}`,
     );
+    state.lastEventId = Math.max(state.lastEventId, payload.event_id || 0);
     state.threads = payload.threads;
     if (state.selected) {
       const updated = state.threads.find((item) => item.id === state.selected.id);
@@ -238,9 +286,13 @@ async function refresh() {
     }
     renderThreads();
   } catch (error) {
-    log("Refresh failed", error.message);
+    log("Refresh failed", error.message, "error");
   } finally {
     state.refreshing = false;
+    if (state.refreshPending) {
+      state.refreshPending = false;
+      void refresh();
+    }
   }
 }
 
@@ -510,7 +562,7 @@ $("#refresh").addEventListener("click", refresh);
 $("#archived").addEventListener("change", refresh);
 $("#created-here").addEventListener("change", refresh);
 $("#clear-log").addEventListener("click", () => {
-  logElement.textContent = "";
+  activityElement.replaceChildren();
 });
 
 function connectEvents() {
@@ -526,20 +578,56 @@ function connectEvents() {
   }
 
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${protocol}//${location.host}/ws/events`);
+  const cursor = new URLSearchParams({ since: String(state.lastEventId) });
+  const socket = new WebSocket(
+    `${protocol}//${location.host}/ws/events?${cursor}`,
+  );
   state.eventsSocket = socket;
+  setEventStatus("Connecting");
   socket.addEventListener("open", () => {
     state.eventsReconnectAttempt = 0;
+    setEventStatus("Syncing");
   });
-  socket.addEventListener("message", async (event) => {
-    const payload = JSON.parse(event.data);
-    if (payload.type === "heartbeat") return;
-    log("Event", payload);
-    await refresh();
+  socket.addEventListener("message", (event) => {
+    state.eventProcessing = state.eventProcessing
+      .then(async () => {
+        const payload = JSON.parse(event.data);
+        if (payload.type === "heartbeat") return;
+        if (payload.type === "event_stream_ready") {
+          state.lastEventId = Math.max(
+            state.lastEventId,
+            payload.latest_event_id || 0,
+          );
+          setEventStatus("Live", "live");
+          return;
+        }
+        if (payload.type === "resync_required") {
+          setEventStatus("Re-syncing");
+          log("Event stream re-sync", payload, "error");
+          await refresh();
+          setEventStatus("Live", "live");
+          return;
+        }
+        if (
+          Number.isInteger(payload.event_id) &&
+          payload.event_id <= state.lastEventId
+        ) {
+          return;
+        }
+        if (Number.isInteger(payload.event_id)) {
+          state.lastEventId = payload.event_id;
+        }
+        log(eventLabel(payload), payload, "event");
+        scheduleRefresh();
+      })
+      .catch((error) => {
+        log("Event processing failed", error.message, "error");
+      });
   });
   socket.addEventListener("close", () => {
     if (state.eventsSocket !== socket) return;
     state.eventsSocket = null;
+    setEventStatus("Offline", "offline");
     const delay = Math.min(
       30000,
       1000 * 2 ** state.eventsReconnectAttempt,

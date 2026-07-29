@@ -161,6 +161,7 @@ Typed endpoints:
 
 ```text
 GET    /api/health
+GET    /api/snapshot
 GET    /api/threads
 POST   /api/threads
 PATCH  /api/threads/{id}
@@ -176,7 +177,7 @@ GET    /api/queue
 DELETE /api/queue/{id}
 POST   /api/queue/{id}/retry
 POST   /api/command
-WS     /ws/events
+WS     /ws/events?since={event_id}
 WS     /ws/terminal/{thread_id}
 ```
 
@@ -189,7 +190,21 @@ app-server and break the shared-thread invariant. The client subscribes before
 starting a turn, correlates `queue_id` to `turn_id`, and returns normalized
 `TurnOutcome` objects.
 
-## 7. Terminal protocol
+## 7. Snapshot and event protocol
+
+`GET /api/snapshot` captures the broker cursor before reading the thread domain.
+Any mutation that overlaps the potentially slow app-server list request therefore
+has an event ID greater than the returned cursor and is replayed by
+`/ws/events?since=...`.
+
+Published events receive a process-local monotonic `event_id` and UTC
+`published_at` timestamp. The broker retains a bounded replay window. A cursor
+outside that window, or one from a previous server process, receives an explicit
+`resync_required` control frame; clients must take a new snapshot. New connections
+receive `event_stream_ready` after all available replay frames. This prevents a
+quiet disconnect from turning into silent stale workflow state.
+
+## 8. Terminal protocol
 
 The terminal WebSocket carries:
 
@@ -210,7 +225,7 @@ after every byte is written.
 Browser-side connection generations prevent rapid thread switching from leaving
 two PTYs alive or mixing stale output into the current xterm.
 
-## 8. Web UI behavior
+## 9. Web UI behavior
 
 - Selecting a thread only changes the debugger selection. Attaching is explicit
   and runs `codex --remote ... resume THREAD`.
@@ -219,9 +234,10 @@ two PTYs alive or mixing stale output into the current xterm.
 - During any app-server active turn, it offers `steer` and `queue`.
 - The Interrupt button serializes `turn.interrupt`.
 - Direct keyboard interaction with the remote TUI remains available.
-- Activity entries include mutation sequence numbers.
+- Activity is a bounded structured event list. Its Live/Re-syncing/Offline state
+  reflects WebSocket continuity; mutation entries retain sequence numbers.
 
-## 9. Durable queue
+## 10. Durable queue
 
 SQLite stores FIFO prompt records. Claims use `BEGIN IMMEDIATE` and a conditional
 state transition:
@@ -234,7 +250,7 @@ On restart, stale `running` records become `indeterminate`. The user must explic
 retry or cancel them. A failed or completed SDK turn triggers dispatch of the next
 eligible row.
 
-## 10. Security and lifecycle
+## 11. Security and lifecycle
 
 - FastAPI and app-server bind only to loopback.
 - one server process is enforced with an advisory runtime lock;

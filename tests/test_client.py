@@ -9,6 +9,7 @@ import pytest
 from codex_thread_console.client import (
     AsyncConsoleClient,
     ConsoleAPIError,
+    EventStreamGapError,
 )
 
 
@@ -31,7 +32,8 @@ class FakeEventClient(AsyncConsoleClient):
         self.fake_socket = FakeEventSocket(events)
 
     @asynccontextmanager
-    async def _event_connection(self):
+    async def _event_connection(self, since_event_id=None):
+        self.since_event_id = since_event_id
         yield self.fake_socket
 
 
@@ -161,3 +163,70 @@ async def test_send_and_wait_follows_queued_turn() -> None:
     assert outcome.turn_id == "turn-queued"
     assert outcome.final_response == "queued done"
     assert outcome.queue_id == 7
+
+
+@pytest.mark.asyncio
+async def test_event_controls_survive_thread_filter() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("HTTP should not be used")
+
+    events = [
+        {"type": "event_stream_ready", "latest_event_id": 4},
+        {
+            "type": "turn_started",
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "event_id": 5,
+        },
+    ]
+    async with FakeEventClient(
+        events,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        stream = client.events(thread_id="thread-1", since_event_id=3)
+        ready = await anext(stream)
+        started = await anext(stream)
+        await stream.aclose()
+
+    assert ready["type"] == "event_stream_ready"
+    assert started["turn_id"] == "turn-1"
+    assert client.since_event_id == 3
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_reports_event_stream_gap() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messages/send"):
+            return httpx.Response(
+                200,
+                json={
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "state": "running",
+                },
+            )
+        if request.url.path.endswith("/status"):
+            return httpx.Response(
+                200,
+                json={
+                    "thread": {"id": "thread-1", "status": "idle"},
+                    "ownership": "idle",
+                    "queue": [],
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    async with FakeEventClient(
+        [
+            {
+                "type": "resync_required",
+                "reason": "subscriber_overflow",
+                "latest_event_id": 900,
+            }
+        ],
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(EventStreamGapError) as caught:
+            await client.send_and_wait("thread-1", "work")
+
+    assert caught.value.code == "event_stream_gap"
