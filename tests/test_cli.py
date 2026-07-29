@@ -5,7 +5,11 @@ import json
 import pytest
 
 import codex_thread_console.cli as cli_module
-from codex_thread_console.cli import ConsoleClient, ConsoleConnectionError
+from codex_thread_console.cli import (
+    ConsoleClient,
+    ConsoleConnectionError,
+    render_result,
+)
 
 
 class _Response:
@@ -86,3 +90,30 @@ def test_connect_fails_before_entering_repl_when_server_is_absent(
     client = ConsoleClient("http://127.0.0.1:8765", "secret", timeout=0.2)
     with pytest.raises(ConsoleConnectionError):
         client.connect()
+
+
+def test_human_thread_list_is_compact() -> None:
+    rendered = render_result(
+        {
+            "threads": [
+                {
+                    "id": "thread-1",
+                    "name": "workflow",
+                    "status": "idle",
+                    "queue_open": 0,
+                    "created_here": True,
+                },
+                {
+                    "id": "thread-2",
+                    "preview": "existing session",
+                    "status": "active",
+                    "queue_open": 2,
+                    "created_here": False,
+                },
+            ]
+        }
+    )
+
+    assert "STATUS" in rendered
+    assert "workflow" in rendered
+    assert "existing session" in rendered

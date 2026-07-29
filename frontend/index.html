@@ -19,12 +19,6 @@
         <div class="policy">one shared app-server · per-thread FIFO</div>
       </header>
 
-      <section class="command-bar">
-        <span class="prompt">›</span>
-        <input id="command" autocomplete="off" spellcheck="false" placeholder="thread list · message queue THREAD &quot;your message&quot;" />
-        <button id="run-command">Run</button>
-      </section>
-
       <main>
         <aside class="threads">
           <div class="panel-title">
@@ -35,7 +29,7 @@
             </div>
           </div>
           <label class="toggle"><input id="archived" type="checkbox" /> Show archived</label>
-          <label class="toggle"><input id="include-all" type="checkbox" /> Include all local Codex history</label>
+          <label class="toggle"><input id="created-here" type="checkbox" /> Created here only</label>
           <div id="thread-list"></div>
         </aside>
 

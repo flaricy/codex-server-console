@@ -13,15 +13,42 @@ from codex_cli_bin import bundled_codex_path
 from openai_codex import CodexConfig
 
 
+def _is_chatgpt_app_binary(path: Path) -> bool:
+    """Return True for binaries shipped inside ChatGPT.app.
+
+    The console must never depend on, inspect, or launch the desktop app's
+    private Codex runtime.  Resolve symlinks before checking so a PATH entry
+    cannot accidentally bypass that boundary.
+    """
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        resolved = path.expanduser().absolute()
+    chatgpt_resources = Path(
+        "/Applications/ChatGPT.app/Contents/Resources"
+    )
+    try:
+        return resolved.is_relative_to(chatgpt_resources)
+    except ValueError:
+        return False
+
+
+def validate_codex_binary(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if _is_chatgpt_app_binary(resolved):
+        raise RuntimeError(
+            "refusing to use the Codex binary bundled inside ChatGPT.app; "
+            "install Codex on PATH or use the official Python SDK bundle"
+        )
+    return resolved
+
+
 def installed_codex_path() -> tuple[Path, str]:
-    """Prefer the Codex installation that owns the user's global state DB."""
+    """Resolve a public Codex CLI without touching ChatGPT.app internals."""
     path_codex = shutil.which("codex")
-    if path_codex:
-        return Path(path_codex).resolve(), "path"
-    desktop_codex = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
-    if desktop_codex.is_file():
-        return desktop_codex, "chatgpt-app"
-    return bundled_codex_path(), "sdk-bundled-fallback"
+    if path_codex and not _is_chatgpt_app_binary(Path(path_codex)):
+        return validate_codex_binary(Path(path_codex)), "path"
+    return validate_codex_binary(bundled_codex_path()), "sdk-bundled"
 
 
 class AppServerRuntime:
@@ -39,7 +66,7 @@ class AppServerRuntime:
         if codex_bin is None:
             self.codex_bin, self.codex_bin_source = installed_codex_path()
         else:
-            self.codex_bin = codex_bin
+            self.codex_bin = validate_codex_binary(codex_bin)
             self.codex_bin_source = "explicit"
         self.startup_timeout = startup_timeout
         self.codex_version = "unknown"

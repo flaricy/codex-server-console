@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import fcntl
 import hmac
@@ -207,12 +208,12 @@ def create_app(
     @app.get("/api/threads", dependencies=[Depends(require_auth)])
     async def list_threads(
         archived: bool = False,
-        include_all: bool = False,
+        created_here: bool = False,
         manager: ThreadManager = Depends(get_manager),
     ) -> dict[str, object]:
         return {
             "threads": await manager.list_threads(
-                archived, include_all=include_all
+                archived, created_here_only=created_here
             )
         }
 
@@ -336,7 +337,10 @@ def create_app(
         return await execute_command(manager, body.command)
 
     async def authenticate_websocket(websocket: WebSocket) -> bool:
-        token = websocket.cookies.get("codex_console_session")
+        token = (
+            websocket.headers.get("x-console-token")
+            or websocket.cookies.get("codex_console_session")
+        )
         origin = websocket.headers.get("origin")
         host = websocket.headers.get("host")
         expected_hosts = {
@@ -469,8 +473,6 @@ def create_app(
         except ConsoleError as exc:
             await websocket.send_json(exc.as_dict())
         finally:
-            if reserved:
-                await manager.begin_pty_stop(thread_id)
             if session is not None:
                 await session.stop()
             if reserved:
@@ -484,7 +486,34 @@ def create_app(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run the local Codex Thread Console control plane"
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        help="root directory that new Codex threads may use",
+    )
+    parser.add_argument("--host", help="loopback host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, help="HTTP port (default: 8765)")
+    parser.add_argument(
+        "--codex-bin",
+        type=Path,
+        help="public Codex CLI shared by app-server and remote TUI",
+    )
+    args = parser.parse_args()
     settings = Settings.from_env()
+    if args.workspace is not None:
+        workspace = args.workspace.expanduser().resolve(strict=True)
+        if not workspace.is_dir():
+            parser.error("--workspace must be a directory")
+        settings.workspace_root = workspace
+    if args.host is not None:
+        settings.host = args.host
+    if args.port is not None:
+        settings.port = args.port
+    if args.codex_bin is not None:
+        settings.codex_bin = args.codex_bin.expanduser().resolve()
     uvicorn.run(
         create_app(settings=settings),
         host=settings.host,

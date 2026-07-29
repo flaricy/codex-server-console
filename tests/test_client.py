@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import json
+from contextlib import asynccontextmanager
+
+import httpx
+import pytest
+
+from codex_thread_console.client import (
+    AsyncConsoleClient,
+    ConsoleAPIError,
+)
+
+
+class FakeEventSocket:
+    def __init__(self, events: list[dict[str, object]]) -> None:
+        self.events = list(events)
+
+    async def recv(self) -> str:
+        return json.dumps(self.events.pop(0))
+
+
+class FakeEventClient(AsyncConsoleClient):
+    def __init__(
+        self,
+        events: list[dict[str, object]],
+        *,
+        transport: httpx.AsyncBaseTransport,
+    ) -> None:
+        super().__init__(token="secret", transport=transport)
+        self.fake_socket = FakeEventSocket(events)
+
+    @asynccontextmanager
+    async def _event_connection(self):
+        yield self.fake_socket
+
+
+@pytest.mark.asyncio
+async def test_typed_http_methods_use_token_and_filters() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-console-token"] == "secret"
+        assert request.url.params["archived"] == "false"
+        assert request.url.params["created_here"] == "true"
+        return httpx.Response(
+            200,
+            json={
+                "threads": [
+                    {
+                        "id": "thread-1",
+                        "created_here": True,
+                    }
+                ]
+            },
+        )
+
+    async with AsyncConsoleClient(
+        token="secret",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        rows = await client.list_threads(created_here=True)
+
+    assert rows == [{"id": "thread-1", "created_here": True}]
+
+
+@pytest.mark.asyncio
+async def test_api_error_preserves_code_and_status() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={
+                "error": {
+                    "code": "thread_busy",
+                    "message": "thread is busy",
+                }
+            },
+        )
+
+    async with AsyncConsoleClient(
+        token="secret",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(ConsoleAPIError) as caught:
+            await client.interrupt("thread-1")
+
+    assert caught.value.code == "thread_busy"
+    assert caught.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_returns_matching_final_response() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/messages/send")
+        return httpx.Response(
+            200,
+            json={
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "state": "running",
+            },
+        )
+
+    events = [
+        {"type": "heartbeat"},
+        {
+            "type": "turn_finished",
+            "thread_id": "other-thread",
+            "turn_id": "other-turn",
+        },
+        {
+            "type": "turn_finished",
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "final_response": "done",
+            "error": None,
+        },
+    ]
+    async with FakeEventClient(
+        events,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        outcome = await client.send_and_wait("thread-1", "work")
+
+    assert outcome.turn_id == "turn-1"
+    assert outcome.final_response == "done"
+    assert outcome.queue_id is None
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_follows_queued_turn() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "thread_id": "thread-1",
+                "queue_id": 7,
+                "state": "queued",
+            },
+        )
+
+    events = [
+        {
+            "type": "turn_started",
+            "thread_id": "thread-1",
+            "turn_id": "turn-queued",
+            "queue_id": 7,
+        },
+        {
+            "type": "turn_finished",
+            "thread_id": "thread-1",
+            "turn_id": "turn-queued",
+            "final_response": "queued done",
+            "error": None,
+        },
+    ]
+    async with FakeEventClient(
+        events,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        outcome = await client.send_and_wait("thread-1", "work")
+
+    assert outcome.turn_id == "turn-queued"
+    assert outcome.final_response == "queued done"
+    assert outcome.queue_id == 7

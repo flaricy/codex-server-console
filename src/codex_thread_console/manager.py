@@ -171,44 +171,52 @@ class ThreadManager:
         return result
 
     async def list_threads(
-        self, archived: bool = False, *, include_all: bool = False
+        self, archived: bool = False, *, created_here_only: bool = False
     ) -> list[dict[str, Any]]:
-        """List console-owned threads unless the caller explicitly opts into history."""
+        """List the app-server thread domain, optionally filtered by origin."""
         managed_rows = self.store.list_managed(archived)
         managed_by_id = {str(row["id"]): row for row in managed_rows}
-        by_id: dict[str, dict[str, Any]] = {}
-
-        if include_all:
-            rows = await self.adapter.list_threads(archived)
-            by_id.update({str(row["id"]): dict(row) for row in rows})
+        rows = await self.adapter.list_threads(archived)
+        by_id: dict[str, dict[str, Any]] = {
+            str(row["id"]): dict(row) for row in rows
+        }
 
         for thread_id, managed in managed_by_id.items():
-            try:
-                row = await self.adapter.read_thread(thread_id, archived=archived)
-            except Exception:
-                row = {
-                    "id": thread_id,
-                    "name": managed["name"],
-                    "preview": "",
-                    "cwd": managed["cwd"],
-                    "status": "draft" if managed["draft"] else "unavailable",
-                    "archived": bool(managed["archived"]),
-                    "created_at": managed["created_at"],
-                    "updated_at": managed["updated_at"],
-                    "model_provider": None,
-                }
+            row = by_id.get(thread_id)
+            if row is None:
+                try:
+                    row = await self.adapter.read_thread(
+                        thread_id, archived=archived
+                    )
+                except Exception:
+                    row = {
+                        "id": thread_id,
+                        "name": managed["name"],
+                        "preview": "",
+                        "cwd": managed["cwd"],
+                        "status": (
+                            "draft" if managed["draft"] else "unavailable"
+                        ),
+                        "archived": bool(managed["archived"]),
+                        "created_at": managed["created_at"],
+                        "updated_at": managed["updated_at"],
+                        "model_provider": None,
+                        "source": {"type": "consoleDraft"},
+                    }
             row = dict(row)
             row["draft"] = bool(managed["draft"])
-            row["source"] = "codex-thread-console"
+            row["created_here"] = True
             by_id[thread_id] = row
 
         rows = list(by_id.values())
         for row in rows:
             row.setdefault("draft", False)
-            row.setdefault("source", "local-codex-history")
+            row.setdefault("created_here", False)
             row["ownership"] = self._mode(row["id"]).value
             row["terminal_attached"] = self._pty_counts[row["id"]] > 0
             row["queue_open"] = self.store.open_count(row["id"])
+        if created_here_only:
+            return [row for row in rows if row["created_here"]]
         return rows
 
     async def create_thread(self, cwd: str | None, name: str | None) -> dict[str, Any]:
@@ -709,30 +717,6 @@ class ThreadManager:
             terminal_count=terminal_count,
         )
         return {**metadata, "cwd": str(cwd)}
-
-    async def begin_pty_stop(self, thread_id: str) -> None:
-        async with self._locks[thread_id]:
-            should_interrupt = (
-                self._pty_counts[thread_id] <= 1
-                and self._mode(thread_id) is not Ownership.sdk_turn
-            )
-            if not should_interrupt:
-                return
-            try:
-                turn_id = await self.adapter.interrupt_active_turn(thread_id)
-            except BaseException as exc:
-                self._publish(
-                    "pty_turn_interrupt_failed",
-                    thread_id=thread_id,
-                    error=str(exc),
-                )
-                return
-        if turn_id is not None:
-            self._publish(
-                "pty_turn_interrupted",
-                thread_id=thread_id,
-                turn_id=turn_id,
-            )
 
     async def release_pty(self, thread_id: str) -> None:
         async with self._locks[thread_id]:

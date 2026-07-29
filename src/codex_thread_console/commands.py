@@ -10,7 +10,7 @@ from .manager import ThreadManager
 
 
 HELP = """Commands:
-  thread list [--archived] [--all-local]
+  thread list [--archived] [--created-here]
   thread create [--name NAME] [--cwd PATH]
   thread rename THREAD NAME
   thread archive THREAD
@@ -52,7 +52,7 @@ def parse_command(line: str) -> ParsedCommand:
     parser = Parser(add_help=False)
     if group == "thread" and action == "list":
         parser.add_argument("--archived", action="store_true")
-        parser.add_argument("--all-local", action="store_true")
+        parser.add_argument("--created-here", action="store_true")
     elif group == "thread" and action == "create":
         parser.add_argument("--name")
         parser.add_argument("--cwd")
@@ -85,7 +85,7 @@ async def execute_command(manager: ThreadManager, line: str) -> dict[str, Any]:
     if group == "thread" and action == "list":
         return {
             "threads": await manager.list_threads(
-                args.archived, include_all=args.all_local
+                args.archived, created_here_only=args.created_here
             )
         }
     if group == "thread" and action == "create":

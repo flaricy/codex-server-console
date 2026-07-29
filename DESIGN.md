@@ -10,8 +10,9 @@ Provide one local control plane for Codex threads:
   interrupt;
 - a turn started through the SDK appears live in the Web TUI;
 - mutations received by the backend execute FIFO per thread;
-- the Python controller uses `openai-codex==0.144.4`, while the app-server and
-  remote TUI use the user's current Codex installation.
+- the Python controller uses `openai-codex==0.144.4`; app-server and remote TUI
+  share one public Codex binary resolved from an explicit override, `PATH`, or
+  the official SDK bundle.
 
 This is a trusted, loopback-only experiment, not a multi-user service.
 
@@ -28,13 +29,11 @@ The pinned Python SDK supports `CodexConfig.launch_args_override`. It normally l
 its own `codex app-server --listen stdio://`; this project instead launches a tiny
 stdio↔WebSocket proxy that connects the SDK to the backend-owned app-server.
 
-The app-server must not be older than the Codex version that last migrated
-`~/.codex/state_*.sqlite`. In the verified environment, Codex 0.146 had applied
-the `drop agent jobs` migration; an older 0.144.4 app-server then failed
-`thread/delete` because it still queried that removed table. Therefore the runtime
-prefers `CODEX_CONSOLE_CODEX_BIN` or the installed `codex` and uses the
-SDK-bundled CLI only as a fallback. Health output exposes both SDK and app-server
-versions.
+The server, proxy, and PTY share one executable. Resolution prefers
+`CODEX_CONSOLE_CODEX_BIN` or a public `codex` on `PATH` and uses the SDK-bundled
+runtime as the zero-configuration fallback. A binary inside ChatGPT.app is never
+selected and is rejected even when explicitly configured. Health output exposes
+both SDK and app-server versions.
 
 The following was verified end to end with the real CLI:
 
@@ -53,6 +52,7 @@ The following was verified end to end with the real CLI:
 Shell controller ── HTTP ──────>│ FastAPI                             │
                                 │  ├─ typed command/API layer          │
 Web composer ───── HTTP ───────>│  ├─ per-thread MutationSequencer    │
+Python workflows ─ HTTP/WS ────>│  ├─ typed async workflow client    │
                                 │  ├─ ThreadManager + SQLite queue     │
                                 │  └─ Python SDK                       │
                                 │       │ stdio                        │
@@ -132,9 +132,9 @@ Attaching a remote TUI does not acquire exclusive thread ownership and does not
 block an SDK turn. This is the central difference from the discarded design that
 ran independent local app-server processes.
 
-`steer` and typed `interrupt` require the live `TurnHandle` held by this backend.
-A turn started manually inside the TUI can still be controlled with the TUI's own
-keyboard interaction.
+`steer` and typed `interrupt` resolve the authoritative active turn from
+app-server and construct an SDK handle for that `threadId`/`turnId` pair. They
+therefore also control a turn started manually inside the attached TUI.
 
 ## 6. Commands and HTTP surface
 
@@ -142,7 +142,7 @@ Shell commands:
 
 ```text
 help
-thread list [--archived] [--all-local]
+thread list [--archived] [--created-here]
 thread create [--name NAME] [--cwd PATH]
 thread rename THREAD NAME
 thread archive|delete THREAD
@@ -182,6 +182,13 @@ WS     /ws/terminal/{thread_id}
 
 The shell parser uses `shlex`; no user command is executed by a system shell.
 
+External Python workflows use `AsyncConsoleClient`. It is intentionally an
+HTTP/WebSocket client for this process rather than another direct `AsyncCodex`
+owner: constructing another SDK transport would launch or connect to another
+app-server and break the shared-thread invariant. The client subscribes before
+starting a turn, correlates `queue_id` to `turn_id`, and returns normalized
+`TurnOutcome` objects.
+
 ## 7. Terminal protocol
 
 The terminal WebSocket carries:
@@ -205,7 +212,8 @@ two PTYs alive or mixing stale output into the current xterm.
 
 ## 8. Web UI behavior
 
-- Selecting a thread attaches `codex --remote ... resume THREAD`.
+- Selecting a thread only changes the debugger selection. Attaching is explicit
+  and runs `codex --remote ... resume THREAD`.
 - The TUI always remains visible while SDK turns run.
 - While idle, the composer offers typed SDK `send` and durable `queue`.
 - During any app-server active turn, it offers `steer` and `queue`.
@@ -236,7 +244,7 @@ eligible row.
 - working directories must resolve under `CODEX_CONSOLE_WORKSPACE_ROOT`;
 - the app-server endpoint file, token, and SQLite database are mode `0600`;
 - the app-server and SDK proxy are child processes and are terminated on shutdown;
-- the last PTY detach interrupts a TUI-originated active turn before process exit;
+- PTY detach is display-only and leaves the authoritative app-server turn running;
 - server shutdown resolves and interrupts active managed turn IDs before stopping
   app-server, and cleanup failures do not skip later process cleanup stages;
 - the browser cannot choose an executable or arbitrary app-server endpoint;

@@ -15,9 +15,6 @@ const state = {
   eventsSocket: null,
   eventsReconnectTimer: null,
   eventsReconnectAttempt: 0,
-  autoAttachSuppressedFor: null,
-  commandHistory: [],
-  historyIndex: 0,
   refreshing: false,
 };
 
@@ -175,18 +172,14 @@ function renderThreads() {
     const cwd = document.createElement("small");
     cwd.textContent = thread.cwd;
     button.append(title, meta, cwd);
-    button.addEventListener("click", () =>
-      selectThread(thread, { userInitiated: true }),
-    );
+    button.addEventListener("click", () => {
+      void chooseThread(thread);
+    });
     list.append(button);
   }
 }
 
-function selectThread(
-  thread,
-  { autoAttach = true, userInitiated = false } = {},
-) {
-  if (userInitiated) state.autoAttachSuppressedFor = null;
+function selectThread(thread) {
   state.selected = thread;
   $("#selected-title").textContent = selectedLabel(thread);
   $("#ownership").textContent = thread.ownership;
@@ -204,15 +197,17 @@ function selectThread(
   $("#archive-thread").textContent = thread.archived ? "Restore" : "Archive";
   renderMessageModes(thread);
   renderThreads();
+}
+
+async function chooseThread(thread) {
   if (
-    autoAttach &&
-    !thread.archived &&
-    state.autoAttachSuppressedFor !== thread.id
+    state.terminalSocket &&
+    state.terminalThreadId !== thread.id
   ) {
-    void connectTerminal(thread).catch((error) => {
-      log("Terminal attach failed", error.message);
-    });
+    state.terminalGeneration += 1;
+    await disconnectTerminal();
   }
+  selectThread(thread);
 }
 
 async function refresh() {
@@ -220,9 +215,9 @@ async function refresh() {
   state.refreshing = true;
   try {
     const archived = $("#archived").checked;
-    const includeAll = $("#include-all").checked;
+    const createdHere = $("#created-here").checked;
     const payload = await api(
-      `/api/threads?archived=${archived}&include_all=${includeAll}`,
+      `/api/threads?archived=${archived}&created_here=${createdHere}`,
     );
     state.threads = payload.threads;
     if (state.selected) {
@@ -249,23 +244,6 @@ async function refresh() {
   }
 }
 
-async function runCommand(line) {
-  if (!line.trim()) return;
-  state.commandHistory.push(line);
-  state.historyIndex = state.commandHistory.length;
-  log(`$ ${line}`);
-  try {
-    const result = await api("/api/command", {
-      method: "POST",
-      body: JSON.stringify({ command: line }),
-    });
-    log("Result", result);
-    await refresh();
-  } catch (error) {
-    log("Command failed", error.message);
-  }
-}
-
 async function waitForIdle(threadId, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -281,27 +259,6 @@ async function waitForIdle(threadId, timeoutMs = 10000) {
   throw new Error("Codex CLI did not finish detaching in time");
 }
 
-$("#run-command").addEventListener("click", () => {
-  const input = $("#command");
-  runCommand(input.value);
-  input.value = "";
-});
-$("#command").addEventListener("keydown", (event) => {
-  const input = event.currentTarget;
-  if (event.key === "Enter") {
-    runCommand(input.value);
-    input.value = "";
-  } else if (event.key === "ArrowUp") {
-    state.historyIndex = Math.max(0, state.historyIndex - 1);
-    input.value = state.commandHistory[state.historyIndex] || "";
-    event.preventDefault();
-  } else if (event.key === "ArrowDown") {
-    state.historyIndex = Math.min(state.commandHistory.length, state.historyIndex + 1);
-    input.value = state.commandHistory[state.historyIndex] || "";
-    event.preventDefault();
-  }
-});
-
 $("#new-thread").addEventListener("click", async () => {
   const name = window.prompt("Thread name (optional):", "");
   if (name === null) return;
@@ -312,7 +269,6 @@ $("#new-thread").addEventListener("click", async () => {
     });
     log("Thread created", payload.thread);
     state.selected = payload.thread;
-    state.autoAttachSuppressedFor = null;
     await refresh();
   } catch (error) {
     log("Create failed", error.message);
@@ -322,7 +278,6 @@ $("#new-thread").addEventListener("click", async () => {
 $("#archive-thread").addEventListener("click", async () => {
   if (!state.selected) return;
   try {
-    state.autoAttachSuppressedFor = state.selected.id;
     state.terminalGeneration += 1;
     await disconnectTerminal();
     await waitForIdle(state.selected.id);
@@ -500,9 +455,6 @@ async function connectTerminal(thread) {
       state.terminalSocket = null;
       state.terminalThreadId = null;
       state.terminalConnectPromise = null;
-      if (state.selected?.id === thread.id) {
-        state.autoAttachSuppressedFor = thread.id;
-      }
       setTerminalStatus("Disconnected");
       if (state.selected?.id === thread.id) {
         $("#attach").textContent = "Attach CLI";
@@ -518,14 +470,12 @@ $("#attach").addEventListener("click", async () => {
     state.terminalSocket &&
     state.terminalThreadId === state.selected?.id
   ) {
-    state.autoAttachSuppressedFor = state.selected.id;
     state.terminalGeneration += 1;
     await disconnectTerminal();
     return;
   }
   if (!state.selected) return;
   try {
-    state.autoAttachSuppressedFor = null;
     await connectTerminal(state.selected);
   } catch (error) {
     log("Terminal attach failed", error.message);
@@ -558,7 +508,7 @@ $("#submit-message").addEventListener("click", async () => {
 
 $("#refresh").addEventListener("click", refresh);
 $("#archived").addEventListener("change", refresh);
-$("#include-all").addEventListener("change", refresh);
+$("#created-here").addEventListener("change", refresh);
 $("#clear-log").addEventListener("click", () => {
   logElement.textContent = "";
 });

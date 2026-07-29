@@ -56,7 +56,7 @@ def test_forbidden_browser_origin(tmp_path) -> None:
         assert response.status_code == 403
 
 
-def test_thread_history_requires_explicit_opt_in(tmp_path) -> None:
+def test_thread_history_is_default_and_created_here_is_a_filter(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     data = tmp_path / "data"
@@ -73,9 +73,13 @@ def test_thread_history_requires_explicit_opt_in(tmp_path) -> None:
     app = create_app(settings=settings, adapter=adapter)
     with TestClient(app, base_url="http://127.0.0.1:8765") as client:
         client.get("/")
-        assert client.get("/api/threads").json()["threads"] == []
-        rows = client.get("/api/threads?include_all=true").json()["threads"]
+        rows = client.get("/api/threads").json()["threads"]
         assert [row["id"] for row in rows] == ["external-thread"]
+        assert rows[0]["created_here"] is False
+        assert (
+            client.get("/api/threads?created_here=true").json()["threads"]
+            == []
+        )
 
 
 def test_archive_and_delete_have_distinct_semantics(tmp_path) -> None:
@@ -181,7 +185,7 @@ def test_terminal_websocket_signals_ready_and_acknowledges_input(
             headers={
                 "Origin": "http://127.0.0.1:8765",
                 "Host": "127.0.0.1:8765",
-                "Cookie": "codex_console_session=secret",
+                "X-Console-Token": "secret",
             },
         ) as websocket:
             assert websocket.receive_json() == {

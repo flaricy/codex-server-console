@@ -33,6 +33,80 @@ class ConsoleConnectionError(RuntimeError):
     pass
 
 
+def _short(value: object, limit: int) -> str:
+    text = "" if value is None else str(value).replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(0, limit - 1)]}…"
+
+
+def _table(headers: tuple[str, ...], rows: list[tuple[object, ...]]) -> str:
+    rendered = [[_short(value, 48) for value in row] for row in rows]
+    widths = [
+        max(
+            len(headers[index]),
+            *(len(row[index]) for row in rendered),
+        )
+        for index in range(len(headers))
+    ]
+    header = "  ".join(
+        value.ljust(widths[index]) for index, value in enumerate(headers)
+    )
+    separator = "  ".join("-" * width for width in widths)
+    body = [
+        "  ".join(
+            value.ljust(widths[index]) for index, value in enumerate(row)
+        ).rstrip()
+        for row in rendered
+    ]
+    return "\n".join([header, separator, *body])
+
+
+def render_result(result: dict[str, object]) -> str:
+    error = result.get("error")
+    if isinstance(error, dict):
+        code = error.get("code", "error")
+        return f"{code}: {error.get('message', 'unknown error')}"
+    help_text = result.get("help")
+    if isinstance(help_text, str):
+        return help_text.rstrip()
+    threads = result.get("threads")
+    if isinstance(threads, list):
+        if not threads:
+            return "No threads."
+        return _table(
+            ("STATUS", "QUEUE", "NAME", "THREAD"),
+            [
+                (
+                    row.get("status", "unknown"),
+                    row.get("queue_open", 0),
+                    row.get("name") or row.get("preview") or "",
+                    row.get("id", ""),
+                )
+                for row in threads
+                if isinstance(row, dict)
+            ],
+        )
+    queue = result.get("queue")
+    if isinstance(queue, list):
+        if not queue:
+            return "Queue is empty."
+        return _table(
+            ("ID", "STATE", "THREAD", "MESSAGE"),
+            [
+                (
+                    row.get("id", ""),
+                    row.get("state", ""),
+                    row.get("thread_id", ""),
+                    row.get("body", ""),
+                )
+                for row in queue
+                if isinstance(row, dict)
+            ],
+        )
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
 class ConsoleClient:
     """One authenticated, reusable HTTP connection to the console server."""
 
@@ -119,6 +193,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Codex Thread Console shell")
     parser.add_argument("--url", default="http://127.0.0.1:8765")
     parser.add_argument("--token-file", type=Path, default=_default_token_path())
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print machine-readable JSON instead of human-oriented output",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     try:
@@ -138,7 +217,11 @@ def main() -> None:
     try:
         if args.command:
             result = client.call(" ".join(args.command))
-            print(json.dumps(result, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(result, indent=2, ensure_ascii=False)
+                if args.json
+                else render_result(result)
+            )
             return
 
         version = health.get("app_server_version", "unknown")
@@ -161,7 +244,11 @@ def main() -> None:
             except ConsoleConnectionError as exc:
                 print(f"Connection lost: {exc}", file=sys.stderr)
                 return
-            print(json.dumps(result, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(result, indent=2, ensure_ascii=False)
+                if args.json
+                else render_result(result)
+            )
     finally:
         client.close()
 

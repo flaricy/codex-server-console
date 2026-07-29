@@ -19,7 +19,7 @@ def test_rejects_unknown_command() -> None:
         parse_command("shell exec whoami")
 
 
-def test_thread_list_all_local_is_explicit() -> None:
-    parsed = parse_command("thread list --archived --all-local")
+def test_thread_list_can_filter_to_created_here() -> None:
+    parsed = parse_command("thread list --archived --created-here")
     assert parsed.args.archived is True
-    assert parsed.args.all_local is True
+    assert parsed.args.created_here is True

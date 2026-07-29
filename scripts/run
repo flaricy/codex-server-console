@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+workspace=${1:-"$PWD"}
+
+if [ ! -x "$project_root/.venv/bin/codex-thread-console-server" ]; then
+  printf '%s\n' "Not installed. Run $project_root/scripts/setup first." >&2
+  exit 2
+fi
+
+exec "$project_root/.venv/bin/codex-thread-console-server" \
+  --workspace "$workspace"

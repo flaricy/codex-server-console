@@ -23,7 +23,7 @@ button {
 button:hover:not(:disabled) { border-color: var(--cyan); }
 button:disabled { opacity: .35; cursor: default; }
 
-#app { height: 100vh; display: grid; grid-template-rows: 73px 48px 1fr; }
+#app { height: 100vh; display: grid; grid-template-rows: 73px 1fr; }
 header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 18px; border-bottom: 1px solid var(--line); background: #0d1014;
@@ -31,16 +31,6 @@ header {
 h1 { font-family: Georgia, serif; font-size: 24px; font-weight: 500; margin: 2px 0 0; }
 .eyebrow { color: var(--cyan); font-size: 9px; letter-spacing: .18em; }
 .policy { color: var(--muted); font: 11px ui-monospace, monospace; }
-
-.command-bar {
-  display: flex; align-items: center; gap: 10px; padding: 7px 12px;
-  background: #11151a; border-bottom: 1px solid var(--line);
-}
-.command-bar input {
-  flex: 1; color: #e2e8f0; background: transparent; border: 0; outline: 0;
-  font: 13px ui-monospace, monospace;
-}
-.prompt { color: var(--cyan); font: 20px ui-monospace, monospace; }
 
 main { min-height: 0; display: grid; grid-template-columns: 250px minmax(500px, 1fr) 280px; }
 aside, .workspace { min-height: 0; background: var(--panel); }

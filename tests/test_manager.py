@@ -58,18 +58,18 @@ async def test_steer_and_interrupt_tui_originated_turn(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_last_pty_detach_interrupts_tui_originated_turn(tmp_path) -> None:
+async def test_last_pty_detach_leaves_tui_originated_turn_running(tmp_path) -> None:
     manager, adapter = make_manager(tmp_path)
     thread = await manager.create_thread(None, "demo")
     await manager.reserve_pty(thread["id"])
     external = adapter.add_external_turn(thread["id"])
 
-    await manager.begin_pty_stop(thread["id"])
     await manager.release_pty(thread["id"])
 
-    assert external.interrupted is True
+    assert external.interrupted is False
     assert manager._pty_counts[thread["id"]] == 0
     await manager.shutdown()
+    assert external.interrupted is True
     manager.store.close()
 
 
@@ -135,7 +135,6 @@ async def test_remote_pty_can_observe_sdk_turn(tmp_path) -> None:
         await manager.archive(thread["id"])
 
     await manager.interrupt(thread["id"])
-    await manager.begin_pty_stop(thread["id"])
     await manager.release_pty(thread["id"])
     await asyncio.sleep(0)
     assert adapter.turns[0].interrupted is True
@@ -225,7 +224,7 @@ async def test_retried_message_cannot_be_overtaken_by_later_send(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_thread_list_is_console_owned_by_default(tmp_path) -> None:
+async def test_thread_list_includes_app_server_domain_by_default(tmp_path) -> None:
     manager, adapter = make_manager(tmp_path)
     managed = await manager.create_thread(None, "managed")
     adapter.rows["external-thread"] = {
@@ -238,16 +237,19 @@ async def test_thread_list_is_console_owned_by_default(tmp_path) -> None:
     }
 
     default_rows = await manager.list_threads()
-    assert [row["id"] for row in default_rows] == [managed["id"]]
-
-    all_rows = await manager.list_threads(include_all=True)
-    assert {row["id"] for row in all_rows} == {
+    assert {row["id"] for row in default_rows} == {
         managed["id"],
         "external-thread",
     }
     assert next(
-        row for row in all_rows if row["id"] == "external-thread"
-    )["source"] == "local-codex-history"
+        row for row in default_rows if row["id"] == "external-thread"
+    )["created_here"] is False
+    assert next(
+        row for row in default_rows if row["id"] == managed["id"]
+    )["created_here"] is True
+
+    created_here = await manager.list_threads(created_here_only=True)
+    assert [row["id"] for row in created_here] == [managed["id"]]
     manager.store.close()
 
 

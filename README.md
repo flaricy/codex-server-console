@@ -1,6 +1,7 @@
 # Codex Thread Console
 
-A local experiment built with the official Codex Python SDK. It combines:
+A local visual debugger and workflow foundation built on the official Codex
+Python SDK. It combines:
 
 - a FastAPI control server;
 - a durable application-owned FIFO message queue;
@@ -16,41 +17,40 @@ Requirements: macOS or Linux, Python 3.10+, Node.js, and an existing Codex login
 The Python SDK automatically reuses the local Codex authentication.
 
 ```bash
-cd experiments/codex-thread-console
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[test]'
-
-cd frontend
-npm install
-npm run build
-cd ..
+git clone https://github.com/flaricy/codex-server-console.git
+cd codex-server-console
+./scripts/setup
 ```
 
-The controller library is pinned to `openai-codex==0.144.4`, but the app-server
-and remote TUI use the user's currently installed `codex` binary. That binary owns
-and migrates the global `~/.codex` state database, so using an older SDK-bundled
-CLI against a database already migrated by a newer Codex release is unsafe.
+The official SDK includes its matching Codex runtime, which is why a fresh virtual
+environment is much larger than this repository. `.venv`, `node_modules`, runtime
+data, and built assets are local install artifacts and are never committed.
 
 Resolution order is:
 
 1. `CODEX_CONSOLE_CODEX_BIN`, when explicitly set;
 2. `codex` from `PATH`;
-3. the ChatGPT app's Codex binary on macOS;
-4. the SDK-bundled binary only as a last fallback.
+3. the runtime bundled with the official Python SDK.
 
-`GET /api/health` reports the selected binary, source, and version.
+The private runtime inside ChatGPT.app is never used. Even an explicit path or
+`PATH` symlink resolving inside the app bundle is rejected. `GET /api/health`
+reports the selected public binary, source, and version.
 
 ## Run
 
 Choose the directory tree that new threads may use, then start one server process:
 
 ```bash
-cd experiments/codex-thread-console
-export CODEX_CONSOLE_WORKSPACE_ROOT=/absolute/path/to/your/workspace
-.venv/bin/codex-thread-console-server
+./scripts/run /absolute/path/to/your/workspace
 ```
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
+
+The installed command is also available directly:
+
+```bash
+.venv/bin/codex-thread-console-server --workspace /absolute/path/to/workspace
+```
 
 Only loopback binding and one server worker are supported. Runtime state is stored
 under this experiment's `.data/` directory and ignored by Git. Override it with
@@ -103,7 +103,6 @@ interactive CLI traffic and meets SDK traffic at the shared app-server.
 Keep the server and browser open. In another terminal:
 
 ```bash
-cd experiments/codex-thread-console
 .venv/bin/codex-thread-console thread create --name shared-demo
 .venv/bin/codex-thread-console message send shared-demo \
   "Run sleep 30, then summarize what happened."
@@ -124,7 +123,7 @@ Run one command:
 
 ```bash
 .venv/bin/codex-thread-console thread list
-.venv/bin/codex-thread-console thread list --all-local
+.venv/bin/codex-thread-console thread list --created-here
 .venv/bin/codex-thread-console thread create --name "demo"
 .venv/bin/codex-thread-console thread archive demo
 .venv/bin/codex-thread-console message queue demo "Inspect the repository"
@@ -143,30 +142,66 @@ The client opens and authenticates a TCP connection before showing the prompt.
 If the server is unavailable it exits with a clear error instead of entering a
 disconnected shell. The REPL supports terminal line editing, including arrow
 keys, Home/End, deletion, and command history for the current process.
+Thread and queue results use compact tables by default. Add `--json` before the
+command for stable machine-readable output.
 
 The client reads the short-lived server token from the protected runtime data
 directory. Set the same `CODEX_CONSOLE_WORKSPACE_ROOT` in the server and client
 shells.
 
+## Python workflows
+
+Automation must connect to the running console rather than construct another SDK
+client and accidentally launch a second app-server. The included async client is
+a thin typed facade over the same control plane used by Web and the shell:
+
+```python
+import asyncio
+
+from codex_thread_console import AsyncConsoleClient
+
+
+async def main() -> None:
+    async with AsyncConsoleClient() as console:
+        thread = await console.create_thread(
+            cwd="/absolute/path/to/workspace",
+            name="workflow-demo",
+        )
+        outcome = await console.send_and_wait(
+            thread["id"],
+            "Inspect the repository and summarize the highest-risk module.",
+        )
+        print(outcome.final_response)
+
+
+asyncio.run(main())
+```
+
+`events(thread_id=...)` exposes the normalized lifecycle stream for reactive
+workflows. `send_and_wait` subscribes before starting the turn, follows a queued
+message into its eventual turn, and returns its final response. This keeps the
+official Python SDK and app-server authority inside one backend while allowing
+independent Python workflow processes.
+
 ## Important semantics
 
 - `thread archive` is reversible. `thread delete` calls app-server
   `thread/delete` and permanently removes the session and its local queue state.
-- The default list contains only threads created through this console. Use
-  `thread list --all-local` or the explicit UI checkbox to inspect unrelated local
-  Codex history.
+- The default list is the authoritative thread domain of the shared app-server.
+  “Created here” is optional metadata and a filter, not a different session type.
 - The backend starts one loopback `codex app-server` process. The Python SDK connects
   through a stdio↔WebSocket proxy; every browser TUI uses
   `codex --remote <same-endpoint>`. No component starts a second app-server.
-- Selecting a thread launches its real remote Codex TUI. A turn started by the shell
-  controller or Web composer is therefore rendered live in that TUI.
+- Selecting a thread is read-only and does not launch a process. **Attach CLI**
+  explicitly launches its real remote Codex TUI. A turn started by the shell
+  controller or Web composer is rendered live after attachment.
 - The Web composer uses typed operations through the backend: `send` while idle,
   `steer` during any active turn, and durable `queue`. The controller resolves the
   authoritative active `turnId`, so steer/interrupt also work for turns started by
   the TUI rather than this server.
-- Detaching the last PTY interrupts a TUI-originated turn before killing the remote
-  CLI. Ctrl+C server shutdown interrupts active managed turns before stopping the
-  shared app-server, preventing persisted orphan `inProgress` turns.
+- Detaching the PTY only disconnects the local display; the authoritative turn
+  keeps running and can be reattached later. Explicit **Interrupt** and Ctrl+C
+  server shutdown still interrupt active turns before stopping app-server.
 - The browser waits for an explicit `terminal_ready` frame before accepting composer
   input. PTY input with an id is acknowledged only after its complete byte sequence
   is written.
@@ -182,25 +217,12 @@ shells.
 - The loopback app-server endpoint is created at startup, recorded in the protected
   runtime directory, and removed when the console shuts down.
 
-## Known startup display issue
-
-Immediately after a cold server start, rapidly auto-attaching multiple threads can
-leave a later remote TUI showing a stale `Working` indicator even though
-`thread status` reports `idle`. The first attachment may show `Working` briefly;
-the second can remain stale. Refreshing the page rebuilds the remote PTYs and has
-cleared the issue in the verified environment.
-
-This is a terminal-client display inconsistency, not evidence that a model turn is
-still running. Treat the app-server status returned by `thread status THREAD` as
-authoritative. A fresh native `codex --remote ... resume` against the same idle
-thread was verified to open normally, so rebuilding the stale remote PTY is a
-valid recovery while startup attachment synchronization is being improved.
-
 ## Test
 
 ```bash
-PYTHONPATH=src .venv/bin/pytest -q
-cd frontend && npm audit --omit=dev && npm run build
+.venv/bin/python -m pytest -q
+npm audit --omit=dev --prefix frontend
+npm run build --prefix frontend
 ```
 
 The automated suite uses a fake Codex adapter and does not consume model usage. The
