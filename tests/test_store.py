@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from codex_thread_console.store import QueueStore
 
 
@@ -59,3 +61,45 @@ def test_delete_thread_removes_managed_row_and_queue(tmp_path) -> None:
     assert store.list("t1") == []
     assert "t1" not in store.managed_thread_ids()
     store.close()
+
+
+def test_turn_options_are_durable_and_old_database_is_migrated(tmp_path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE queued_messages(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            body TEXT NOT NULL,
+            state TEXT NOT NULL,
+            turn_id TEXT,
+            created_at TEXT NOT NULL,
+            claimed_at TEXT,
+            finished_at TEXT,
+            error TEXT
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = QueueStore(path)
+    item = store.enqueue(
+        "t1",
+        "structured",
+        {
+            "model": "gpt-test",
+            "output_schema": {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+            },
+        },
+    )
+    store.close()
+
+    restarted = QueueStore(path)
+    persisted = restarted.get(item["id"])
+    assert persisted["options"]["model"] == "gpt-test"
+    assert persisted["options"]["output_schema"]["type"] == "object"
+    restarted.close()

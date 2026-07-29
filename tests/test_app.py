@@ -128,6 +128,45 @@ def test_snapshot_cursor_and_event_replay(tmp_path) -> None:
         }
 
 
+def test_turn_endpoint_accepts_stable_sdk_options(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    data = tmp_path / "data"
+    settings = Settings(workspace, data, port=8765, session_token="secret")
+    adapter = FakeAdapter(workspace)
+    app = create_app(settings=settings, adapter=adapter)
+
+    with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+        client.get("/")
+        thread = client.post(
+            "/api/threads",
+            json={"name": "structured"},
+        ).json()["thread"]
+        response = client.post(
+            f"/api/threads/{thread['id']}/messages/send",
+            json={
+                "text": "return JSON",
+                "effort": "high",
+                "model": "gpt-test",
+                "output_schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                },
+                "summary": "concise",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["options"]["summary"] == "concise"
+        assert adapter.turn_options[0]["effort"] == "high"
+        assert adapter.turn_options[0]["output_schema"]["type"] == "object"
+        unknown = client.post(
+            f"/api/threads/{thread['id']}/messages/send",
+            json={"text": "bad", "private_sdk_option": True},
+        )
+        assert unknown.status_code == 422
+
+
 def test_archive_and_delete_have_distinct_semantics(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

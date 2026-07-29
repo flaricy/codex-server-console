@@ -56,6 +56,44 @@
             </select>
             <textarea id="message" rows="2" placeholder="Message for the selected thread"></textarea>
             <button id="submit-message" disabled>Submit</button>
+            <details id="turn-options" class="turn-options">
+              <summary>Turn options <span>send / queue only</span></summary>
+              <div class="turn-options-grid">
+                <label>Model<input id="turn-model" placeholder="server default" /></label>
+                <label>Effort
+                  <select id="turn-effort">
+                    <option value="">server default</option>
+                    <option value="minimal">minimal</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                  </select>
+                </label>
+                <label>Summary
+                  <select id="turn-summary">
+                    <option value="">server default</option>
+                    <option value="none">none</option>
+                    <option value="auto">auto</option>
+                    <option value="concise">concise</option>
+                    <option value="detailed">detailed</option>
+                  </select>
+                </label>
+                <label>Personality
+                  <select id="turn-personality">
+                    <option value="">server default</option>
+                    <option value="none">none</option>
+                    <option value="friendly">friendly</option>
+                    <option value="pragmatic">pragmatic</option>
+                  </select>
+                </label>
+                <label>CWD<input id="turn-cwd" placeholder="thread cwd" /></label>
+                <label>Service tier<input id="turn-service-tier" placeholder="server default" /></label>
+                <label class="schema-field">Output schema (JSON object)
+                  <textarea id="turn-output-schema" rows="3" placeholder='{"type":"object","properties":{}}'></textarea>
+                </label>
+              </div>
+            </details>
           </div>
         </section>
 

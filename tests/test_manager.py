@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from codex_thread_console.config import Settings
-from codex_thread_console.errors import ConflictError
+from codex_thread_console.errors import ConflictError, ConsoleError
 from codex_thread_console.manager import Ownership, ThreadManager
 from codex_thread_console.store import QueueStore
 
@@ -35,6 +35,82 @@ async def test_send_steer_complete(tmp_path) -> None:
     adapter.turns[0].done.set()
     await asyncio.wait_for(manager._tasks[thread["id"]], timeout=1)
     assert manager._mode(thread["id"]) is Ownership.idle
+    manager.store.close()
+
+
+@pytest.mark.asyncio
+async def test_turn_options_reach_sdk_and_keep_cwd_inside_workspace(
+    tmp_path,
+) -> None:
+    manager, adapter = make_manager(tmp_path)
+    thread = await manager.create_thread(None, "demo")
+    nested = manager.settings.workspace_root / "nested"
+    nested.mkdir()
+
+    started = await manager.send(
+        thread["id"],
+        "structured work",
+        {
+            "cwd": str(nested),
+            "effort": "high",
+            "model": "gpt-test",
+            "output_schema": {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+            },
+        },
+    )
+
+    assert started["options"]["cwd"] == str(nested.resolve())
+    assert adapter.turn_options[0] == started["options"]
+    adapter.turns[0].done.set()
+    await asyncio.wait_for(manager._tasks[thread["id"]], timeout=1)
+    await manager.shutdown()
+    manager.store.close()
+
+
+@pytest.mark.asyncio
+async def test_turn_options_cannot_escape_workspace(tmp_path) -> None:
+    manager, adapter = make_manager(tmp_path)
+    thread = await manager.create_thread(None, "demo")
+
+    with pytest.raises(
+        ConsoleError, match="working directory must be inside"
+    ):
+        await manager.send(
+            thread["id"],
+            "unsafe cwd",
+            {"cwd": str(tmp_path)},
+        )
+
+    assert adapter.turns == []
+    await manager.shutdown()
+    manager.store.close()
+
+
+@pytest.mark.asyncio
+async def test_queued_turn_preserves_options_until_sdk_dispatch(
+    tmp_path,
+) -> None:
+    manager, adapter = make_manager(tmp_path)
+    thread = await manager.create_thread(None, "demo")
+
+    queued = await manager.queue(
+        thread["id"],
+        "queued structured work",
+        {
+            "model": "gpt-test",
+            "summary": "detailed",
+            "output_schema": {"type": "object"},
+        },
+    )
+    await manager.dispatch_if_idle(thread["id"])
+
+    assert queued["options"]["summary"] == "detailed"
+    assert adapter.turn_options == [queued["options"]]
+    adapter.turns[0].done.set()
+    await asyncio.wait_for(manager._tasks[thread["id"]], timeout=1)
+    await manager.shutdown()
     manager.store.close()
 
 
@@ -380,10 +456,10 @@ async def test_shutdown_waits_for_inflight_dispatch_start(tmp_path) -> None:
     start_release = asyncio.Event()
     original_start = adapter.start_turn
 
-    async def blocked_start(thread_id, body):
+    async def blocked_start(thread_id, body, options=None):
         start_entered.set()
         await start_release.wait()
-        return await original_start(thread_id, body)
+        return await original_start(thread_id, body, options)
 
     adapter.start_turn = blocked_start
     await manager.queue(thread["id"], "queued")
@@ -439,7 +515,7 @@ async def test_start_timeout_makes_shutdown_bounded_and_queue_indeterminate(
     never = asyncio.Event()
     started = asyncio.Event()
 
-    async def stuck_start(thread_id, body):
+    async def stuck_start(thread_id, body, options=None):
         started.set()
         await never.wait()
 

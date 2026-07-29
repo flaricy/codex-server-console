@@ -534,12 +534,44 @@ $("#attach").addEventListener("click", async () => {
   }
 });
 
+function composerTurnOptions() {
+  const options = {};
+  const textFields = {
+    cwd: "#turn-cwd",
+    model: "#turn-model",
+    service_tier: "#turn-service-tier",
+  };
+  for (const [key, selector] of Object.entries(textFields)) {
+    const value = $(selector).value.trim();
+    if (value) options[key] = value;
+  }
+  const selects = {
+    effort: "#turn-effort",
+    personality: "#turn-personality",
+    summary: "#turn-summary",
+  };
+  for (const [key, selector] of Object.entries(selects)) {
+    const value = $(selector).value;
+    if (value) options[key] = value;
+  }
+  const schema = $("#turn-output-schema").value.trim();
+  if (schema) {
+    const parsed = JSON.parse(schema);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+      throw new Error("output schema must be a JSON object");
+    }
+    options.output_schema = parsed;
+  }
+  return options;
+}
+
 $("#submit-message").addEventListener("click", async () => {
   if (!state.selected) return log("Select a thread first");
   const mode = $("#message-mode").value;
   const text = $("#message").value.trim();
   if (!text) return;
   try {
+    const turnOptions = mode === "steer" ? {} : composerTurnOptions();
     const path =
       mode === "steer"
         ? "messages/steer"
@@ -548,7 +580,7 @@ $("#submit-message").addEventListener("click", async () => {
           : "messages/send";
     const result = await api(`/api/threads/${state.selected.id}/${path}`, {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, ...turnOptions }),
     });
     $("#message").value = "";
     log(`${mode} committed`, result);

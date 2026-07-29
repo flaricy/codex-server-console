@@ -4,7 +4,7 @@ import asyncio
 from collections import defaultdict
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .adapter import CodexAdapter, TurnLike
 from .config import Settings
@@ -12,6 +12,7 @@ from .errors import ConflictError, ConsoleError
 from .events import EventBroker
 from .sequencer import MutationSequencer
 from .store import QueueStore
+from .turns import TurnOptions, normalize_turn_options
 
 
 class Ownership(str, Enum):
@@ -149,6 +150,19 @@ class ThreadManager:
             raise ConsoleError(
                 "server_draining", "server is shutting down", status=503
             )
+
+    def _validate_turn_options(
+        self, options: Mapping[str, Any] | None
+    ) -> TurnOptions:
+        try:
+            normalized = normalize_turn_options(options)
+            if "cwd" in normalized:
+                normalized["cwd"] = str(
+                    self.settings.validate_cwd(normalized["cwd"])
+                )
+            return normalized
+        except (OSError, ValueError) as exc:
+            raise ConsoleError("invalid_turn_options", str(exc)) from exc
 
     async def _serialize_mutation(
         self,
@@ -432,34 +446,53 @@ class ThreadManager:
         self._dispatch_tasks.add(task)
         task.add_done_callback(self._dispatch_tasks.discard)
 
-    async def send(self, thread_id: str, body: str) -> dict[str, Any]:
+    async def send(
+        self,
+        thread_id: str,
+        body: str,
+        options: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return await self._serialize_mutation(
             thread_id,
             "turn.start",
-            lambda: self._send(thread_id, body),
+            lambda: self._send(thread_id, body, options),
         )
 
-    async def _send(self, thread_id: str, body: str) -> dict[str, Any]:
+    async def _send(
+        self,
+        thread_id: str,
+        body: str,
+        options: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
         self._ensure_serving()
         if not body.strip():
             raise ConsoleError("empty_message", "message cannot be empty")
+        turn_options = self._validate_turn_options(options)
         async with self._locks[thread_id]:
             self._require_not_archived(thread_id)
             if self.store.open_count(thread_id):
-                return self._enqueue_deferred_send(thread_id, body)
+                return self._enqueue_deferred_send(
+                    thread_id, body, turn_options
+                )
             if self._mode(thread_id) is not Ownership.idle:
-                return self._enqueue_deferred_send(thread_id, body)
+                return self._enqueue_deferred_send(
+                    thread_id, body, turn_options
+                )
             metadata = await self.adapter.read_thread(thread_id)
             if metadata["status"] != "idle":
                 self._ownership[thread_id] = Ownership.reconciling
                 self._schedule_dispatch_retry(thread_id)
-                return self._enqueue_deferred_send(thread_id, body)
+                return self._enqueue_deferred_send(
+                    thread_id, body, turn_options
+                )
             async with self._start_lock:
                 if self._draining:
                     self._ensure_serving()
                 try:
                     handle = await asyncio.wait_for(
-                        self.adapter.start_turn(thread_id, body),
+                        self.adapter.start_turn(
+                            thread_id, body, turn_options
+                        ),
                         timeout=self.start_timeout,
                     )
                 except BaseException as exc:
@@ -478,19 +511,33 @@ class ThreadManager:
                     self._ownership[thread_id] = Ownership.reconciling
                     self._ensure_serving()
             self.store.update_managed(thread_id, draft=0)
-            self._start_handle(thread_id, handle, queue_id=None)
-        return {"thread_id": thread_id, "turn_id": handle.id, "state": "running"}
+            self._start_handle(
+                thread_id,
+                handle,
+                queue_id=None,
+                options=turn_options,
+            )
+        return {
+            "thread_id": thread_id,
+            "turn_id": handle.id,
+            "state": "running",
+            "options": turn_options,
+        }
 
     def _enqueue_deferred_send(
-        self, thread_id: str, body: str
+        self,
+        thread_id: str,
+        body: str,
+        options: TurnOptions,
     ) -> dict[str, Any]:
-        item = self.store.enqueue(thread_id, body)
+        item = self.store.enqueue(thread_id, body, options)
         self._publish("message_queued", item=item, reason="thread_busy")
         self._trigger_dispatch(thread_id)
         return {
             "thread_id": thread_id,
             "state": "queued",
             "queue_id": item["id"],
+            "options": options,
         }
 
     async def steer(self, thread_id: str, body: str) -> dict[str, Any]:
@@ -554,21 +601,32 @@ class ThreadManager:
                 await self.adapter.interrupt_turn(thread_id, turn_id)
         return {"thread_id": thread_id, "turn_id": turn_id, "interrupted": True}
 
-    async def queue(self, thread_id: str, body: str) -> dict[str, Any]:
+    async def queue(
+        self,
+        thread_id: str,
+        body: str,
+        options: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return await self._serialize_mutation(
             thread_id,
             "turn.queue",
-            lambda: self._queue(thread_id, body),
+            lambda: self._queue(thread_id, body, options),
         )
 
-    async def _queue(self, thread_id: str, body: str) -> dict[str, Any]:
+    async def _queue(
+        self,
+        thread_id: str,
+        body: str,
+        options: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
         self._ensure_serving()
         if not body.strip():
             raise ConsoleError("empty_message", "message cannot be empty")
+        turn_options = self._validate_turn_options(options)
         async with self._locks[thread_id]:
             self._require_not_archived(thread_id)
             await self.adapter.read_thread(thread_id)
-            item = self.store.enqueue(thread_id, body)
+            item = self.store.enqueue(thread_id, body, turn_options)
         self._publish("message_queued", item=item)
         self._trigger_dispatch(thread_id)
         return item
@@ -612,7 +670,11 @@ class ThreadManager:
                     return
                 try:
                     handle = await asyncio.wait_for(
-                        self.adapter.start_turn(thread_id, str(item["body"])),
+                        self.adapter.start_turn(
+                            thread_id,
+                            str(item["body"]),
+                            normalize_turn_options(item.get("options")),
+                        ),
                         timeout=self.start_timeout,
                     )
                     self.store.update_managed(thread_id, draft=0)
@@ -639,10 +701,19 @@ class ThreadManager:
                     )
                     self._ownership[thread_id] = Ownership.reconciling
                     return
-            self._start_handle(thread_id, handle, queue_id=int(item["id"]))
+            self._start_handle(
+                thread_id,
+                handle,
+                queue_id=int(item["id"]),
+                options=normalize_turn_options(item.get("options")),
+            )
 
     def _start_handle(
-        self, thread_id: str, handle: TurnLike, queue_id: int | None
+        self,
+        thread_id: str,
+        handle: TurnLike,
+        queue_id: int | None,
+        options: TurnOptions,
     ) -> None:
         self._ownership[thread_id] = Ownership.sdk_turn
         self._handles[thread_id] = handle
@@ -653,6 +724,7 @@ class ThreadManager:
             thread_id=thread_id,
             turn_id=handle.id,
             queue_id=queue_id,
+            options=options,
         )
 
     async def _run_handle(

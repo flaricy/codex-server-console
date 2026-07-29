@@ -188,7 +188,14 @@ HTTP/WebSocket client for this process rather than another direct `AsyncCodex`
 owner: constructing another SDK transport would launch or connect to another
 app-server and break the shared-thread invariant. The client subscribes before
 starting a turn, correlates `queue_id` to `turn_id`, and returns normalized
-`TurnOutcome` objects.
+`TurnOutcome` objects. `AsyncThreadController` binds those operations to one
+thread without hiding the lower-level client.
+
+The control plane passes through the stable official-SDK turn overrides `cwd`,
+`effort`, `model`, `output_schema`, `personality`, `service_tier`, and `summary`.
+It does not expose approval or sandbox overrides. Generated dynamic-tool protocol
+types are not treated as a stable handler API; support belongs behind
+`CodexAdapter` once the official SDK publishes that contract.
 
 ## 7. Snapshot and event protocol
 
@@ -239,8 +246,9 @@ two PTYs alive or mixing stale output into the current xterm.
 
 ## 10. Durable queue
 
-SQLite stores FIFO prompt records. Claims use `BEGIN IMMEDIATE` and a conditional
-state transition:
+SQLite stores FIFO prompt records together with their normalized turn options.
+Existing databases are migrated in place with a default empty options object.
+Claims use `BEGIN IMMEDIATE` and a conditional state transition:
 
 ```text
 queued -> running -> done | failed | indeterminate
@@ -258,6 +266,7 @@ eligible row.
   validation;
 - shell commands require the protected runtime token;
 - working directories must resolve under `CODEX_CONSOLE_WORKSPACE_ROOT`;
+- per-turn `cwd` overrides are validated against the same workspace boundary;
 - the app-server endpoint file, token, and SQLite database are mode `0600`;
 - the app-server and SDK proxy are child processes and are terminated on shutdown;
 - PTY detach is display-only and leaves the authoritative app-server turn running;

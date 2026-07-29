@@ -9,7 +9,15 @@ from openai_codex import (
     CodexConfig,
     Sandbox,
 )
-from openai_codex.generated.v2_all import ThreadDeleteResponse, ThreadSourceKind
+from openai_codex.generated.v2_all import (
+    Personality,
+    ReasoningEffort,
+    ReasoningSummary,
+    ThreadDeleteResponse,
+    ThreadSourceKind,
+)
+
+from .turns import TurnOptions
 
 
 class TurnLike(Protocol):
@@ -135,7 +143,13 @@ class CodexAdapter:
         response = await thread.read()
         return _thread_dto(response.thread, archived=False)
 
-    async def start_turn(self, thread_id: str, body: str) -> TurnLike:
+    async def start_turn(
+        self,
+        thread_id: str,
+        body: str,
+        options: TurnOptions | None = None,
+    ) -> TurnLike:
+        options = options or {}
         thread = await self._client.thread_resume(
             thread_id,
             approval_mode=ApprovalMode.deny_all,
@@ -144,7 +158,26 @@ class CodexAdapter:
         return await thread.turn(
             body,
             approval_mode=ApprovalMode.deny_all,
+            cwd=options.get("cwd"),
+            effort=(
+                ReasoningEffort(options["effort"])
+                if "effort" in options
+                else None
+            ),
+            model=options.get("model"),
+            output_schema=options.get("output_schema"),
+            personality=(
+                Personality(options["personality"])
+                if "personality" in options
+                else None
+            ),
             sandbox=Sandbox.read_only,
+            service_tier=options.get("service_tier"),
+            summary=(
+                ReasoningSummary.model_validate(options["summary"])
+                if "summary" in options
+                else None
+            ),
         )
 
     async def active_turn_id(self, thread_id: str) -> str | None:

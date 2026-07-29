@@ -41,6 +41,7 @@ class FakeAdapter:
         self.rows: dict[str, dict[str, Any]] = {}
         self.archived: set[str] = set()
         self.turns: list[FakeTurn] = []
+        self.turn_options: list[dict[str, Any]] = []
         self.turns_by_id: dict[str, FakeTurn] = {}
         self.active_turn_ids: dict[str, str] = {}
         self.started = False
@@ -95,9 +96,15 @@ class FakeAdapter:
         self.archived.remove(thread_id)
         return dict(self.rows[thread_id])
 
-    async def start_turn(self, thread_id: str, body: str) -> FakeTurn:
+    async def start_turn(
+        self,
+        thread_id: str,
+        body: str,
+        options: dict[str, Any] | None = None,
+    ) -> FakeTurn:
         turn = FakeTurn(f"turn-{len(self.turns) + 1}")
         self.turns.append(turn)
+        self.turn_options.append(dict(options or {}))
         self.turns_by_id[turn.id] = turn
         self.active_turn_ids[thread_id] = turn.id
         return turn

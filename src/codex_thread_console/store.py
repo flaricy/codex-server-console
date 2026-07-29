@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ class QueueStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     thread_id TEXT NOT NULL,
                     body TEXT NOT NULL,
+                    options_json TEXT NOT NULL DEFAULT '{}',
                     state TEXT NOT NULL CHECK(state IN (
                       'queued','running','indeterminate','done','failed','cancelled'
                     )),
@@ -42,6 +44,17 @@ class QueueStore:
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in self._connection.execute(
+                    "PRAGMA table_info(queued_messages)"
+                ).fetchall()
+            }
+            if "options_json" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE queued_messages "
+                    "ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'"
+                )
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS managed_threads(
@@ -63,14 +76,35 @@ class QueueStore:
 
     @staticmethod
     def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-        return dict(row) if row is not None else None
+        if row is None:
+            return None
+        result = dict(row)
+        raw_options = result.pop("options_json", "{}")
+        try:
+            options = json.loads(raw_options or "{}")
+        except (TypeError, json.JSONDecodeError):
+            options = {}
+        result["options"] = options if isinstance(options, dict) else {}
+        return result
 
-    def enqueue(self, thread_id: str, body: str) -> dict[str, Any]:
+    def enqueue(
+        self,
+        thread_id: str,
+        body: str,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        encoded_options = json.dumps(
+            options or {},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         with self._lock, self._connection:
             cursor = self._connection.execute(
-                "INSERT INTO queued_messages(thread_id,body,state,created_at) "
-                "VALUES(?,?,'queued',?)",
-                (thread_id, body, _now()),
+                "INSERT INTO queued_messages"
+                "(thread_id,body,options_json,state,created_at) "
+                "VALUES(?,?,?,'queued',?)",
+                (thread_id, body, encoded_options, _now()),
             )
             row = self._connection.execute(
                 "SELECT * FROM queued_messages WHERE id=?", (cursor.lastrowid,)
@@ -135,7 +169,7 @@ class QueueStore:
         sql += " ORDER BY id"
         with self._lock:
             rows = self._connection.execute(sql, args).fetchall()
-        return [dict(row) for row in rows]
+        return [self._dict(row) or {} for row in rows]
 
     def get(self, item_id: int) -> dict[str, Any]:
         with self._lock:

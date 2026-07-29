@@ -167,11 +167,22 @@ async def main() -> None:
             cwd="/absolute/path/to/workspace",
             name="workflow-demo",
         )
-        outcome = await console.send_and_wait(
-            thread["id"],
+        workflow = console.thread(thread["id"])
+        outcome = await workflow.send_and_wait(
             "Inspect the repository and summarize the highest-risk module.",
+            options={
+                "effort": "high",
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "module": {"type": "string"},
+                        "risk": {"type": "string"},
+                    },
+                    "required": ["module", "risk"],
+                },
+            },
         )
-        print(outcome.final_response)
+        print(outcome.json())
 
 
 asyncio.run(main())
@@ -189,6 +200,19 @@ response unknowable, it raises `EventStreamGapError` after the thread is confirm
 idle rather than returning a false success. This keeps the official Python SDK
 and app-server authority inside one backend while allowing independent Python
 workflow processes.
+
+The thread-bound facade accepts the stable official-SDK overrides `cwd`, `effort`,
+`model`, `output_schema`, `personality`, `service_tier`, and `summary`. They are
+persisted with queued messages, so a delayed FIFO dispatch has the same semantics
+as an immediate turn. Per-turn `cwd` is still constrained to the configured
+workspace. Approval and sandbox policy intentionally remain fixed at
+`deny_all`/`read_only`; automation cannot use an option to bypass that boundary.
+
+This package deliberately does not recreate the SDK's entire generated protocol.
+The current SDK contains generated dynamic-tool wire types but no stable high-level
+registration/handler API, so this console does not bind itself to those private
+internals. A future dynamic-tool layer should land behind the adapter when the
+official SDK exposes that contract.
 
 ## Important semantics
 

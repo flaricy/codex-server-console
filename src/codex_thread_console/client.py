@@ -14,6 +14,7 @@ import httpx
 import websockets
 
 from .config import default_data_dir
+from .turns import TurnOptions, normalize_turn_options
 
 
 class ConsoleAPIError(RuntimeError):
@@ -44,6 +45,12 @@ class TurnOutcome:
     final_response: str | None
     error: str | None
     queue_id: int | None = None
+
+    def json(self) -> Any:
+        """Decode a structured final response produced with output_schema."""
+        if self.final_response is None:
+            raise ValueError("turn has no final response")
+        return json.loads(self.final_response)
 
 
 def _event_thread_id(event: dict[str, Any]) -> str | None:
@@ -212,14 +219,34 @@ class AsyncConsoleClient:
         )
         return dict(payload["thread"])
 
+    def thread(self, thread_id: str) -> "AsyncThreadController":
+        return AsyncThreadController(self, thread_id)
+
+    async def rename(self, thread_id: str, name: str) -> dict[str, Any]:
+        payload = await self._request(
+            "PATCH",
+            f"/api/threads/{thread_id}",
+            json_body={"name": name},
+        )
+        return dict(payload["thread"])
+
     async def status(self, thread_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/threads/{thread_id}/status")
 
-    async def send(self, thread_id: str, text: str) -> dict[str, Any]:
+    async def send(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        options: TurnOptions | None = None,
+    ) -> dict[str, Any]:
         return await self._request(
             "POST",
             f"/api/threads/{thread_id}/messages/send",
-            json_body={"text": text},
+            json_body={
+                "text": text,
+                **normalize_turn_options(options),
+            },
         )
 
     async def steer(self, thread_id: str, text: str) -> dict[str, Any]:
@@ -229,11 +256,20 @@ class AsyncConsoleClient:
             json_body={"text": text},
         )
 
-    async def queue(self, thread_id: str, text: str) -> dict[str, Any]:
+    async def queue(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        options: TurnOptions | None = None,
+    ) -> dict[str, Any]:
         payload = await self._request(
             "POST",
             f"/api/threads/{thread_id}/messages/queue",
-            json_body={"text": text},
+            json_body={
+                "text": text,
+                **normalize_turn_options(options),
+            },
         )
         return dict(payload["item"])
 
@@ -257,6 +293,24 @@ class AsyncConsoleClient:
         return await self._request(
             "DELETE", f"/api/threads/{thread_id}"
         )
+
+    async def list_queue(
+        self, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        payload = await self._request(
+            "GET",
+            "/api/queue",
+            params={"thread_id": thread_id} if thread_id else None,
+        )
+        return list(payload.get("queue", []))
+
+    async def cancel_queue(self, item_id: int) -> dict[str, Any]:
+        payload = await self._request("DELETE", f"/api/queue/{item_id}")
+        return dict(payload["item"])
+
+    async def retry_queue(self, item_id: int) -> dict[str, Any]:
+        payload = await self._request("POST", f"/api/queue/{item_id}/retry")
+        return dict(payload["item"])
 
     def _event_url(self, since_event_id: int | None = None) -> str:
         return urlunsplit(
@@ -342,11 +396,16 @@ class AsyncConsoleClient:
         thread_id: str,
         text: str,
         *,
+        options: TurnOptions | None = None,
         timeout: float = 300.0,
         raise_on_error: bool = True,
     ) -> TurnOutcome:
         async with self._event_connection() as socket:
-            accepted = await self.send(thread_id, text)
+            accepted = await self.send(
+                thread_id,
+                text,
+                options=options,
+            )
             target_turn = accepted.get("turn_id")
             target_queue = accepted.get("queue_id")
             if target_turn is None and target_queue is None:
@@ -413,3 +472,87 @@ class AsyncConsoleClient:
                         return outcome
 
             return await asyncio.wait_for(wait(), timeout=timeout)
+
+
+@dataclass(frozen=True, slots=True)
+class AsyncThreadController:
+    """Thread-bound convenience facade for composable workflows."""
+
+    _client: AsyncConsoleClient
+    id: str
+
+    async def status(self) -> dict[str, Any]:
+        return await self._client.status(self.id)
+
+    async def rename(self, name: str) -> dict[str, Any]:
+        return await self._client.rename(self.id, name)
+
+    async def send(
+        self,
+        text: str,
+        *,
+        options: TurnOptions | None = None,
+    ) -> dict[str, Any]:
+        return await self._client.send(self.id, text, options=options)
+
+    async def send_and_wait(
+        self,
+        text: str,
+        *,
+        options: TurnOptions | None = None,
+        timeout: float = 300.0,
+        raise_on_error: bool = True,
+    ) -> TurnOutcome:
+        return await self._client.send_and_wait(
+            self.id,
+            text,
+            options=options,
+            timeout=timeout,
+            raise_on_error=raise_on_error,
+        )
+
+    async def steer(self, text: str) -> dict[str, Any]:
+        return await self._client.steer(self.id, text)
+
+    async def queue(
+        self,
+        text: str,
+        *,
+        options: TurnOptions | None = None,
+    ) -> dict[str, Any]:
+        return await self._client.queue(self.id, text, options=options)
+
+    async def interrupt(self) -> dict[str, Any]:
+        return await self._client.interrupt(self.id)
+
+    async def list_queue(self) -> list[dict[str, Any]]:
+        return await self._client.list_queue(self.id)
+
+    async def archive(self) -> dict[str, Any]:
+        return await self._client.archive(self.id)
+
+    async def restore(self) -> dict[str, Any]:
+        return await self._client.restore(self.id)
+
+    async def delete(self) -> dict[str, Any]:
+        return await self._client.delete(self.id)
+
+    async def wait_for_idle(
+        self,
+        *,
+        timeout: float = 300.0,
+        poll_interval: float = 0.25,
+    ) -> dict[str, Any]:
+        return await self._client.wait_for_idle(
+            self.id,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+
+    def events(
+        self, *, since_event_id: int | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        return self._client.events(
+            thread_id=self.id,
+            since_event_id=since_event_id,
+        )

@@ -21,7 +21,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from openai_codex import __version__ as sdk_version
 
 from .adapter import CodexAdapter
@@ -45,7 +45,22 @@ class ThreadRename(BaseModel):
 
 
 class MessageBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     text: str
+
+
+class TurnMessageBody(MessageBody):
+    cwd: str | None = None
+    effort: str | None = None
+    model: str | None = None
+    output_schema: dict[str, Any] | None = None
+    personality: str | None = None
+    service_tier: str | None = None
+    summary: str | None = None
+
+    def options(self) -> dict[str, Any]:
+        return self.model_dump(exclude={"text"}, exclude_none=True)
 
 
 class CommandBody(BaseModel):
@@ -286,10 +301,10 @@ def create_app(
     )
     async def send_message(
         thread_id: str,
-        body: MessageBody,
+        body: TurnMessageBody,
         manager: ThreadManager = Depends(get_manager),
     ) -> dict[str, object]:
-        return await manager.send(thread_id, body.text)
+        return await manager.send(thread_id, body.text, body.options())
 
     @app.post(
         "/api/threads/{thread_id}/messages/steer",
@@ -308,10 +323,14 @@ def create_app(
     )
     async def queue_message(
         thread_id: str,
-        body: MessageBody,
+        body: TurnMessageBody,
         manager: ThreadManager = Depends(get_manager),
     ) -> dict[str, object]:
-        return {"item": await manager.queue(thread_id, body.text)}
+        return {
+            "item": await manager.queue(
+                thread_id, body.text, body.options()
+            )
+        }
 
     @app.post(
         "/api/threads/{thread_id}/interrupt", dependencies=[Depends(require_auth)]

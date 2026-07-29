@@ -10,6 +10,7 @@ from codex_thread_console.client import (
     AsyncConsoleClient,
     ConsoleAPIError,
     EventStreamGapError,
+    TurnOutcome,
 )
 
 
@@ -86,6 +87,53 @@ async def test_api_error_preserves_code_and_status() -> None:
 
     assert caught.value.code == "thread_busy"
     assert caught.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_thread_facade_sends_stable_sdk_options() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload == {
+            "text": "return JSON",
+            "effort": "high",
+            "model": "gpt-test",
+            "output_schema": {"type": "object"},
+        }
+        return httpx.Response(
+            200,
+            json={
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "state": "running",
+                "options": {key: value for key, value in payload.items() if key != "text"},
+            },
+        )
+
+    async with AsyncConsoleClient(
+        token="secret",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        accepted = await client.thread("thread-1").send(
+            "return JSON",
+            options={
+                "effort": "high",
+                "model": "gpt-test",
+                "output_schema": {"type": "object"},
+            },
+        )
+
+    assert accepted["turn_id"] == "turn-1"
+
+
+def test_turn_outcome_decodes_structured_response() -> None:
+    outcome = TurnOutcome(
+        thread_id="thread-1",
+        turn_id="turn-1",
+        final_response='{"answer": 42}',
+        error=None,
+    )
+
+    assert outcome.json() == {"answer": 42}
 
 
 @pytest.mark.asyncio
