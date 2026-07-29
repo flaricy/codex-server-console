@@ -4,10 +4,25 @@ set -eu
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 python_bin=${PYTHON:-python3}
 
-"$python_bin" -m venv "$project_root/.venv"
-"$project_root/.venv/bin/python" -m pip install -e "$project_root[test]"
+if ! command -v npm >/dev/null 2>&1; then
+  printf '%s\n' "Node.js/npm is required to build the Web UI." >&2
+  exit 2
+fi
+
+if command -v uv >/dev/null 2>&1; then
+  (
+    cd "$project_root"
+    uv sync --frozen --extra test
+  )
+else
+  "$python_bin" -m venv "$project_root/.venv"
+  "$project_root/.venv/bin/python" -m pip install -e "$project_root[test]"
+fi
+
 npm --prefix "$project_root/frontend" ci
 npm --prefix "$project_root/frontend" run build
 
 printf '%s\n' "Ready. Start with:"
 printf '  %s\n' "$project_root/scripts/run /path/to/workspace"
+printf '%s\n' "Open the shell client with:"
+printf '  %s\n' "$project_root/scripts/console"

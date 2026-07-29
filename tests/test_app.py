@@ -82,6 +82,38 @@ def test_thread_history_is_default_and_created_here_is_a_filter(tmp_path) -> Non
         )
 
 
+def test_outside_workspace_history_is_read_only(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    data = tmp_path / "data"
+    settings = Settings(workspace, data, port=8765, session_token="secret")
+    adapter = FakeAdapter(workspace)
+    adapter.rows["outside-thread"] = {
+        "id": "outside-thread",
+        "name": "outside",
+        "preview": "",
+        "cwd": str(outside),
+        "status": "idle",
+        "archived": False,
+    }
+    app = create_app(settings=settings, adapter=adapter)
+
+    with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+        client.get("/")
+        row = client.get("/api/threads").json()["threads"][0]
+        assert row["controllable"] is False
+        response = client.post(
+            "/api/threads/outside-thread/messages/send",
+            json={"text": "must not run"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "thread_outside_workspace"
+    assert adapter.turns == []
+
+
 def test_snapshot_cursor_and_event_replay(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

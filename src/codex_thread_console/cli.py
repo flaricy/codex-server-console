@@ -75,10 +75,15 @@ def render_result(result: dict[str, object]) -> str:
         if not threads:
             return "No threads."
         return _table(
-            ("STATUS", "QUEUE", "NAME", "THREAD"),
+            ("STATUS", "SCOPE", "QUEUE", "NAME", "THREAD"),
             [
                 (
                     row.get("status", "unknown"),
+                    (
+                        "inspect"
+                        if row.get("controllable") is False
+                        else "control"
+                    ),
                     row.get("queue_open", 0),
                     row.get("name") or row.get("preview") or "",
                     row.get("id", ""),

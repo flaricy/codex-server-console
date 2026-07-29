@@ -22,6 +22,12 @@ cd codex-server-console
 ./scripts/setup
 ```
 
+`setup` uses `uv` when available and falls back to the standard-library virtual
+environment plus pip. It also performs the reproducible npm install and Web build.
+Run it again after moving the checkout: generated Python entry points contain an
+absolute interpreter path, while the checked-in `run` and `console` wrappers do
+not depend on those entry-point shebangs.
+
 The official SDK includes its matching Codex runtime, which is why a fresh virtual
 environment is much larger than this repository. `.venv`, `node_modules`, runtime
 data, and built assets are local install artifacts and are never committed.
@@ -46,10 +52,11 @@ Choose the directory tree that new threads may use, then start one server proces
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
 
-The installed command is also available directly:
+The wrapper can also use the current directory as the workspace:
 
 ```bash
-.venv/bin/codex-thread-console-server --workspace /absolute/path/to/workspace
+cd /absolute/path/to/workspace
+/path/to/codex-server-console/scripts/run
 ```
 
 Only loopback binding and one server worker are supported. Runtime state is stored
@@ -91,7 +98,10 @@ The two paths serve different purposes:
 The SDK normally starts its own stdio app-server. Here, a small
 stdio↔WebSocket proxy redirects it to the same backend-owned app-server used by
 every remote TUI. This is what lets a prompt sent from the shell or Web controls
-appear in the attached Codex TUI.
+appear in the attached Codex TUI. The proxy also mirrors only bounded lifecycle
+notifications (never streaming deltas or full responses) to the manager. That
+side channel lets Web and workflow clients observe and control turns started
+directly inside the TUI.
 
 Codex app-server state is authoritative. SQLite stores only application-owned
 queue and console metadata. FastAPI serializes mutations FIFO per thread, while
@@ -103,8 +113,8 @@ interactive CLI traffic and meets SDK traffic at the shared app-server.
 Keep the server and browser open. In another terminal:
 
 ```bash
-.venv/bin/codex-thread-console thread create --name shared-demo
-.venv/bin/codex-thread-console message send shared-demo \
+./scripts/console thread create --name shared-demo
+./scripts/console message send shared-demo \
   "Run sleep 30, then summarize what happened."
 ```
 
@@ -122,20 +132,20 @@ also cannot be overtaken by a later `send`.
 Run one command:
 
 ```bash
-.venv/bin/codex-thread-console thread list
-.venv/bin/codex-thread-console thread list --created-here
-.venv/bin/codex-thread-console thread create --name "demo"
-.venv/bin/codex-thread-console thread archive demo
-.venv/bin/codex-thread-console message queue demo "Inspect the repository"
-.venv/bin/codex-thread-console message steer demo "Focus on correctness"
-.venv/bin/codex-thread-console message interrupt demo
-.venv/bin/codex-thread-console thread delete demo
+./scripts/console thread list
+./scripts/console thread list --created-here
+./scripts/console thread create --name "demo"
+./scripts/console thread archive demo
+./scripts/console message queue demo "Inspect the repository"
+./scripts/console message steer demo "Focus on correctness"
+./scripts/console message interrupt demo
+./scripts/console thread delete demo
 ```
 
 Or enter the interactive REPL:
 
 ```bash
-.venv/bin/codex-thread-console
+./scripts/console
 ```
 
 The client opens and authenticates a TCP connection before showing the prompt.
@@ -190,16 +200,17 @@ asyncio.run(main())
 
 `snapshot()` returns the current thread view plus an `event_id`.
 `events(thread_id=..., since_event_id=...)` exposes the normalized lifecycle
-stream and replays events from that cursor after a disconnect. If the bounded
-replay window was exceeded, it yields `resync_required` so the workflow can take
-a new snapshot instead of silently operating on stale state.
+stream. It reconnects automatically from the last delivered event ID and asks
+the server to replay the gap. If the bounded replay window was exceeded, it
+yields `resync_required` so the workflow can take a new snapshot instead of
+silently operating on stale state.
 
-`send_and_wait` subscribes before starting the turn, follows a queued message into
-its eventual turn, and returns its final response. If event loss makes that final
-response unknowable, it raises `EventStreamGapError` after the thread is confirmed
-idle rather than returning a false success. This keeps the official Python SDK
-and app-server authority inside one backend while allowing independent Python
-workflow processes.
+`send_and_wait` waits for the subscription-ready frame before starting the turn,
+follows a queued message into its eventual turn, and reconnects from its confirmed
+cursor if the socket drops. If event loss makes the final response unknowable, it
+raises `EventStreamGapError` after the thread is confirmed idle rather than
+returning a false success. This keeps the official Python SDK and app-server
+authority inside one backend while allowing independent Python workflow processes.
 
 The thread-bound facade accepts the stable official-SDK overrides `cwd`, `effort`,
 `model`, `output_schema`, `personality`, `service_tier`, and `summary`. They are
@@ -220,6 +231,10 @@ official SDK exposes that contract.
   `thread/delete` and permanently removes the session and its local queue state.
 - The default list is the authoritative thread domain of the shared app-server.
   “Created here” is optional metadata and a filter, not a different session type.
+- History outside the configured workspace remains visible for debugging but is
+  explicitly marked `inspect only`. Every mutation and CLI attachment is rejected
+  server-side with HTTP 403. Start the server with a broader workspace root only
+  when those sessions should be controllable.
 - The backend starts one loopback `codex app-server` process. The Python SDK connects
   through a stdio↔WebSocket proxy; every browser TUI uses
   `codex --remote <same-endpoint>`. No component starts a second app-server.
@@ -259,9 +274,10 @@ official SDK exposes that contract.
 
 ```bash
 .venv/bin/python -m pytest -q
-npm audit --omit=dev --prefix frontend
-npm run build --prefix frontend
+npm --prefix frontend run build
+npm --prefix frontend audit --omit=dev
 ```
 
 The automated suite uses a fake Codex adapter and does not consume model usage. The
-manual live smoke test is described in [DESIGN.md](./DESIGN.md).
+manual live smoke test is described in [DESIGN.md](./DESIGN.md). GitHub Actions
+runs the Python suite on 3.10 and 3.12 plus the Web build and production audit.

@@ -356,19 +356,43 @@ class AsyncConsoleClient:
         *,
         thread_id: str | None = None,
         since_event_id: int | None = None,
+        reconnect: bool = True,
+        reconnect_delay: float = 0.25,
     ) -> AsyncIterator[dict[str, Any]]:
-        async with self._event_connection(since_event_id) as socket:
-            while True:
-                event = json.loads(await socket.recv())
-                if event.get("type") == "heartbeat":
-                    continue
-                if (
-                    event.get("type")
-                    in {"event_stream_ready", "resync_required"}
-                    or thread_id is None
-                    or _event_thread_id(event) == thread_id
-                ):
-                    yield event
+        cursor = since_event_id
+        delay = max(0.0, reconnect_delay)
+        while True:
+            try:
+                async with self._event_connection(cursor) as socket:
+                    while True:
+                        event = json.loads(await socket.recv())
+                        event_id = event.get("event_id")
+                        if isinstance(event_id, int):
+                            cursor = max(cursor or 0, event_id)
+                        elif event.get("type") == "event_stream_ready":
+                            latest = event.get("latest_event_id")
+                            if isinstance(latest, int):
+                                cursor = max(cursor or 0, latest)
+                        if event.get("type") == "heartbeat":
+                            continue
+                        if (
+                            event.get("type")
+                            in {"event_stream_ready", "resync_required"}
+                            or thread_id is None
+                            or _event_thread_id(event) == thread_id
+                        ):
+                            yield event
+            except asyncio.CancelledError:
+                raise
+            except (
+                websockets.ConnectionClosed,
+                OSError,
+                asyncio.TimeoutError,
+            ):
+                if not reconnect:
+                    raise
+                if delay:
+                    await asyncio.sleep(delay)
 
     async def wait_for_idle(
         self,
@@ -400,78 +424,141 @@ class AsyncConsoleClient:
         timeout: float = 300.0,
         raise_on_error: bool = True,
     ) -> TurnOutcome:
-        async with self._event_connection() as socket:
-            accepted = await self.send(
-                thread_id,
-                text,
-                options=options,
-            )
-            target_turn = accepted.get("turn_id")
-            target_queue = accepted.get("queue_id")
-            if target_turn is None and target_queue is None:
-                raise ConsoleAPIError(
-                    "console accepted a turn without a turn_id or queue_id",
-                    code="invalid_turn_acceptance",
-                )
+        async def run() -> TurnOutcome:
+            cursor: int | None = None
+            target_turn: Any = None
+            target_queue: Any = None
 
-            async def wait() -> TurnOutcome:
-                nonlocal target_turn
+            async def handle_event(event: dict[str, Any]) -> TurnOutcome | None:
+                nonlocal cursor, target_turn
+                event_id = event.get("event_id")
+                if isinstance(event_id, int):
+                    cursor = max(cursor or 0, event_id)
+                event_type = event.get("type")
+                if event_type == "heartbeat":
+                    return None
+                if event_type == "event_stream_ready":
+                    latest = event.get("latest_event_id")
+                    if isinstance(latest, int):
+                        cursor = max(cursor or 0, latest)
+                    return None
+                if event_type == "resync_required":
+                    await self.wait_for_idle(thread_id, timeout=timeout)
+                    raise EventStreamGapError(
+                        "turn became idle after an event-stream gap; "
+                        "the final response cannot be recovered safely",
+                        code="event_stream_gap",
+                    )
+                if _event_thread_id(event) != thread_id:
+                    return None
+                if (
+                    event_type == "queue_indeterminate"
+                    and target_queue is not None
+                    and event.get("item_id") == target_queue
+                ):
+                    raise TurnFailedError(
+                        str(event.get("error") or "queued turn is indeterminate"),
+                        code="queue_indeterminate",
+                    )
+                if (
+                    event_type == "turn_started"
+                    and target_queue is not None
+                    and event.get("queue_id") == target_queue
+                ):
+                    target_turn = event.get("turn_id")
+                    return None
+                if (
+                    event_type == "turn_finished"
+                    and target_turn is not None
+                    and event.get("turn_id") == target_turn
+                ):
+                    outcome = TurnOutcome(
+                        thread_id=thread_id,
+                        turn_id=str(target_turn),
+                        final_response=event.get("final_response"),
+                        error=event.get("error"),
+                        queue_id=(
+                            int(target_queue)
+                            if target_queue is not None
+                            else None
+                        ),
+                    )
+                    if outcome.error and raise_on_error:
+                        raise TurnFailedError(
+                            outcome.error,
+                            code="turn_failed",
+                        )
+                    return outcome
+                return None
+
+            async def receive(socket: Any) -> TurnOutcome:
                 while True:
                     event = json.loads(await socket.recv())
-                    event_type = event.get("type")
-                    if event_type == "heartbeat":
-                        continue
-                    if event_type == "event_stream_ready":
-                        continue
-                    if event_type == "resync_required":
-                        await self.wait_for_idle(thread_id, timeout=timeout)
-                        raise EventStreamGapError(
-                            "turn became idle after an event-stream gap; "
-                            "the final response cannot be recovered safely",
-                            code="event_stream_gap",
-                        )
-                    if _event_thread_id(event) != thread_id:
-                        continue
-                    if (
-                        event_type == "queue_indeterminate"
-                        and target_queue is not None
-                        and event.get("item_id") == target_queue
-                    ):
-                        raise TurnFailedError(
-                            str(event.get("error") or "queued turn is indeterminate"),
-                            code="queue_indeterminate",
-                        )
-                    if (
-                        event_type == "turn_started"
-                        and target_queue is not None
-                        and event.get("queue_id") == target_queue
-                    ):
-                        target_turn = event.get("turn_id")
-                        continue
-                    if (
-                        event_type == "turn_finished"
-                        and target_turn is not None
-                        and event.get("turn_id") == target_turn
-                    ):
-                        outcome = TurnOutcome(
-                            thread_id=thread_id,
-                            turn_id=str(target_turn),
-                            final_response=event.get("final_response"),
-                            error=event.get("error"),
-                            queue_id=(
-                                int(target_queue)
-                                if target_queue is not None
-                                else None
-                            ),
-                        )
-                        if outcome.error and raise_on_error:
-                            raise TurnFailedError(
-                                outcome.error,
-                                code="turn_failed",
-                            )
+                    outcome = await handle_event(event)
+                    if outcome is not None:
                         return outcome
 
-            return await asyncio.wait_for(wait(), timeout=timeout)
+            reconnect_errors = (
+                websockets.ConnectionClosed,
+                OSError,
+                asyncio.TimeoutError,
+            )
+            disconnected = False
+            while target_turn is None and target_queue is None:
+                try:
+                    async with self._event_connection() as socket:
+                        # The ready frame proves the server-side subscriber
+                        # exists before the HTTP mutation can publish
+                        # turn_started.
+                        while True:
+                            initial = json.loads(await socket.recv())
+                            if initial.get("type") == "heartbeat":
+                                continue
+                            if initial.get("type") == "resync_required":
+                                await handle_event(initial)
+                            if initial.get("type") != "event_stream_ready":
+                                raise ConsoleAPIError(
+                                    "event stream did not send its ready frame",
+                                    code="invalid_event_stream",
+                                )
+                            await handle_event(initial)
+                            break
+
+                        accepted = await self.send(
+                            thread_id,
+                            text,
+                            options=options,
+                        )
+                        target_turn = accepted.get("turn_id")
+                        target_queue = accepted.get("queue_id")
+                        if target_turn is None and target_queue is None:
+                            raise ConsoleAPIError(
+                                "console accepted a turn without a turn_id "
+                                "or queue_id",
+                                code="invalid_turn_acceptance",
+                            )
+                        try:
+                            return await receive(socket)
+                        except reconnect_errors:
+                            disconnected = True
+                except reconnect_errors:
+                    # No mutation has been sent yet, so reconnecting here
+                    # cannot duplicate work.
+                    await asyncio.sleep(0.25)
+                    continue
+                if disconnected:
+                    break
+
+            while disconnected:
+                try:
+                    async with self._event_connection(cursor) as socket:
+                        return await receive(socket)
+                except reconnect_errors:
+                    await asyncio.sleep(0.25)
+
+            raise AssertionError("unreachable event stream state")
+
+        return await asyncio.wait_for(run(), timeout=timeout)
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,9 +637,13 @@ class AsyncThreadController:
         )
 
     def events(
-        self, *, since_event_id: int | None = None
+        self,
+        *,
+        since_event_id: int | None = None,
+        reconnect: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
         return self._client.events(
             thread_id=self.id,
             since_event_id=since_event_id,
+            reconnect=reconnect,
         )

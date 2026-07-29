@@ -174,9 +174,16 @@ function selectedLabel(thread) {
 function renderMessageModes(thread) {
   const select = $("#message-mode");
   const previous = select.value;
+  const controllable = thread.controllable !== false;
   select.replaceChildren();
   select.disabled = false;
+  $("#message").disabled = false;
   $("#submit-message").disabled = false;
+  for (const field of $("#turn-options").querySelectorAll(
+    "input, select, textarea",
+  )) {
+    field.disabled = false;
+  }
 
   const addOption = (value, label) => {
     const option = document.createElement("option");
@@ -185,9 +192,23 @@ function renderMessageModes(thread) {
     select.append(option);
   };
 
-  if (thread.archived) {
+  if (!controllable) {
+    addOption(
+      "unavailable",
+      "Inspect only · outside the configured workspace",
+    );
+    select.disabled = true;
+    $("#message").disabled = true;
+    $("#submit-message").disabled = true;
+    for (const field of $("#turn-options").querySelectorAll(
+      "input, select, textarea",
+    )) {
+      field.disabled = true;
+    }
+  } else if (thread.archived) {
     addOption("unavailable", "Restore this thread before sending messages");
     select.disabled = true;
+    $("#message").disabled = true;
     $("#submit-message").disabled = true;
   } else if (
     thread.ownership === "sdk_turn" ||
@@ -214,7 +235,9 @@ function renderThreads() {
     const title = document.createElement("strong");
     title.textContent = selectedLabel(thread);
     const meta = document.createElement("span");
-    meta.textContent = `${thread.status}${thread.draft ? " · draft" : ""} · ${thread.ownership} · ${thread.queue_open} queued`;
+    const scope =
+      thread.controllable === false ? " · inspect only" : "";
+    meta.textContent = `${thread.status}${thread.draft ? " · draft" : ""}${scope} · ${thread.ownership} · ${thread.queue_open} queued`;
     const cwd = document.createElement("small");
     cwd.textContent = thread.cwd;
     button.append(title, meta, cwd);
@@ -276,7 +299,10 @@ function renderQueue() {
       details.append(summary, options);
       item.append(details);
     }
-    if (queued.state === "queued" || queued.state === "indeterminate") {
+    if (
+      state.selected.controllable !== false &&
+      (queued.state === "queued" || queued.state === "indeterminate")
+    ) {
       const actions = document.createElement("div");
       actions.className = "queue-actions";
       if (queued.state === "indeterminate") {
@@ -331,10 +357,14 @@ async function mutateQueue(method, itemId, action = "") {
 
 function selectThread(thread) {
   state.selected = thread;
+  const controllable = thread.controllable !== false;
   $("#selected-title").textContent = selectedLabel(thread);
-  $("#ownership").textContent = thread.ownership;
-  $("#attach").disabled = thread.archived;
+  $("#ownership").textContent = controllable
+    ? thread.ownership
+    : "inspect only";
+  $("#attach").disabled = thread.archived || !controllable;
   $("#interrupt-turn").disabled =
+    !controllable ||
     thread.archived ||
     (thread.ownership !== "sdk_turn" && thread.status !== "active");
   $("#attach").textContent =
@@ -342,8 +372,11 @@ function selectThread(thread) {
       ? "Detach"
       : "Attach CLI";
   $("#archive-thread").disabled =
-    !thread.archived &&
-    (thread.ownership !== "idle" || thread.status !== "idle");
+    !controllable ||
+    (
+      !thread.archived &&
+      (thread.ownership !== "idle" || thread.status !== "idle")
+    );
   $("#archive-thread").textContent = thread.archived ? "Restore" : "Archive";
   renderMessageModes(thread);
   renderThreads();
@@ -389,7 +422,10 @@ async function refresh() {
         $("#archive-thread").disabled = true;
       }
     } else if (state.threads.length) {
-      selectThread(state.threads[0]);
+      selectThread(
+        state.threads.find((thread) => thread.controllable !== false) ||
+          state.threads[0],
+      );
     }
     renderThreads();
     await refreshQueue();
@@ -436,7 +472,7 @@ $("#new-thread").addEventListener("click", async () => {
 });
 
 $("#archive-thread").addEventListener("click", async () => {
-  if (!state.selected) return;
+  if (!state.selected || state.selected.controllable === false) return;
   try {
     state.terminalGeneration += 1;
     await disconnectTerminal();
@@ -502,6 +538,11 @@ async function disconnectTerminal() {
 }
 
 async function connectTerminal(thread) {
+  if (thread.controllable === false) {
+    throw new Error(
+      thread.control_reason || "thread is outside the configured workspace",
+    );
+  }
   if (
     state.terminalThreadId === thread.id &&
     state.terminalSocket?.readyState === WebSocket.OPEN
@@ -634,7 +675,7 @@ $("#attach").addEventListener("click", async () => {
     await disconnectTerminal();
     return;
   }
-  if (!state.selected) return;
+  if (!state.selected || state.selected.controllable === false) return;
   try {
     await connectTerminal(state.selected);
   } catch (error) {
@@ -675,6 +716,13 @@ function composerTurnOptions() {
 
 $("#submit-message").addEventListener("click", async () => {
   if (!state.selected) return log("Select a thread first");
+  if (state.selected.controllable === false) {
+    return log(
+      "Inspect-only thread",
+      state.selected.control_reason ||
+        "This thread is outside the configured workspace.",
+    );
+  }
   const mode = $("#message-mode").value;
   const text = $("#message").value.trim();
   if (!text) return;

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -23,6 +25,57 @@ def test_sdk_proxy_targets_shared_endpoint(tmp_path) -> None:
         "ws://127.0.0.1:43123",
     )
     assert runtime.sdk_config().launch_args_override == runtime.proxy_args
+    assert (
+        runtime.sdk_config().env["CODEX_CONSOLE_TAP_TOKEN"]
+        == runtime._tap_token
+    )
+
+
+def test_sdk_proxy_includes_notification_tap_when_started(tmp_path) -> None:
+    runtime = AppServerRuntime(tmp_path, codex_bin=Path("/tmp/codex"))
+    runtime.port = 43123
+    runtime.tap_port = 43124
+
+    assert runtime.proxy_args[-2:] == (
+        "ws://127.0.0.1:43123",
+        "43124",
+    )
+
+
+@pytest.mark.asyncio
+async def test_notification_tap_authenticates_and_queues_lifecycle_event(
+    tmp_path,
+) -> None:
+    runtime = AppServerRuntime(tmp_path, codex_bin=Path("/tmp/codex"))
+    await runtime._start_notification_tap()
+    assert runtime.tap_port is not None
+    _reader, writer = await asyncio.open_connection(
+        "127.0.0.1", runtime.tap_port
+    )
+    writer.write(runtime._tap_token.encode() + b"\n")
+    writer.write(
+        json.dumps(
+            {
+                "method": "turn/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1"},
+                },
+            }
+        ).encode()
+        + b"\n"
+    )
+    await writer.drain()
+
+    notification = await asyncio.wait_for(
+        runtime.next_notification(), timeout=1
+    )
+
+    assert notification["method"] == "turn/started"
+    assert notification["params"]["turn"]["id"] == "turn-1"
+    writer.close()
+    await writer.wait_closed()
+    await runtime.close()
 
 
 def test_explicit_binary_is_not_replaced(tmp_path) -> None:

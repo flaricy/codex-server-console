@@ -18,6 +18,7 @@ from .turns import TurnOptions, normalize_turn_options
 class Ownership(str, Enum):
     idle = "idle"
     sdk_turn = "sdk_turn"
+    external_turn = "external_turn"
     reconciling = "reconciling"
 
 
@@ -43,6 +44,9 @@ class ThreadManager:
         self._pty_counts: defaultdict[str, int] = defaultdict(int)
         self._handles: dict[str, TurnLike] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._external_turns: dict[str, str] = {}
+        self._sdk_starting: set[str] = set()
+        self._pending_app_server_starts: dict[str, str] = {}
         self._retry_handles: dict[str, asyncio.TimerHandle] = {}
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
         self._start_lock = asyncio.Lock()
@@ -50,10 +54,152 @@ class ThreadManager:
         self._draining = False
 
     def _mode(self, thread_id: str) -> Ownership:
-        return self._ownership.get(thread_id, Ownership.idle)
+        mode = self._ownership.get(thread_id, Ownership.idle)
+        if mode is not Ownership.idle:
+            return mode
+        if thread_id in self._external_turns:
+            return Ownership.external_turn
+        return Ownership.idle
 
     def _publish(self, event_type: str, **payload: Any) -> None:
         self.events.publish({"type": event_type, **payload})
+
+    @staticmethod
+    def _notification_ids(
+        params: Mapping[str, Any],
+    ) -> tuple[str | None, str | None]:
+        thread_id = params.get("threadId")
+        turn_id = params.get("turnId")
+        turn = params.get("turn")
+        if not isinstance(turn_id, str) and isinstance(turn, dict):
+            nested = turn.get("id")
+            turn_id = nested if isinstance(nested, str) else None
+        return (
+            thread_id if isinstance(thread_id, str) else None,
+            turn_id if isinstance(turn_id, str) else None,
+        )
+
+    @staticmethod
+    def _notification_status(params: Mapping[str, Any]) -> str | None:
+        status = params.get("status")
+        if isinstance(status, str):
+            return status
+        if isinstance(status, dict):
+            status_type = status.get("type")
+            if isinstance(status_type, str):
+                return status_type
+        turn = params.get("turn")
+        if isinstance(turn, dict):
+            turn_status = turn.get("status")
+            if isinstance(turn_status, str):
+                return turn_status
+        return None
+
+    def _mark_external_turn(self, thread_id: str, turn_id: str) -> None:
+        if self._handles.get(thread_id) is not None:
+            if self._handles[thread_id].id == turn_id:
+                return
+        previous = self._external_turns.get(thread_id)
+        self._external_turns[thread_id] = turn_id
+        if self._ownership.get(thread_id) is Ownership.reconciling:
+            self._ownership.pop(thread_id, None)
+        if previous != turn_id:
+            self._publish(
+                "external_turn_started",
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+
+    def _finish_sdk_start(
+        self,
+        thread_id: str,
+        accepted_turn_id: str | None,
+    ) -> None:
+        self._sdk_starting.discard(thread_id)
+        observed_turn_id = self._pending_app_server_starts.pop(
+            thread_id, None
+        )
+        if (
+            observed_turn_id is not None
+            and observed_turn_id != accepted_turn_id
+        ):
+            self._mark_external_turn(thread_id, observed_turn_id)
+
+    def observe_app_server_notification(
+        self,
+        notification: Mapping[str, Any],
+    ) -> None:
+        """Reconcile lifecycle notifications emitted by the shared app-server."""
+        method = notification.get("method")
+        params = notification.get("params")
+        if not isinstance(method, str) or not isinstance(params, dict):
+            return
+        thread_id, turn_id = self._notification_ids(params)
+        self._publish(
+            "codex_event",
+            method=method,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            payload=params,
+        )
+
+        if (
+            method == "turn/started"
+            and thread_id is not None
+            and turn_id is not None
+        ):
+            handle = self._handles.get(thread_id)
+            if handle is not None and handle.id == turn_id:
+                return
+            if thread_id in self._sdk_starting:
+                self._pending_app_server_starts[thread_id] = turn_id
+                return
+            self._mark_external_turn(thread_id, turn_id)
+            return
+
+        if method == "turn/completed" and thread_id is not None:
+            if (
+                turn_id is not None
+                and self._external_turns.get(thread_id) == turn_id
+            ):
+                self._external_turns.pop(thread_id, None)
+                self._ownership.pop(thread_id, None)
+                self._publish(
+                    "external_turn_finished",
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    status=self._notification_status(params),
+                )
+                if not self._draining:
+                    self._trigger_dispatch(thread_id)
+            elif (
+                thread_id not in self._handles
+                and thread_id not in self._sdk_starting
+            ):
+                # Completion can be the first observed lifecycle frame after
+                # a reconnect. It still proves the thread may dispatch again.
+                self._ownership.pop(thread_id, None)
+                if not self._draining:
+                    self._trigger_dispatch(thread_id)
+            return
+
+        if method == "thread/status/changed" and thread_id is not None:
+            status = self._notification_status(params)
+            if status in {"idle", "notLoaded"}:
+                external_turn_id = self._external_turns.pop(
+                    thread_id, None
+                )
+                if external_turn_id is not None:
+                    self._publish(
+                        "external_turn_finished",
+                        thread_id=thread_id,
+                        turn_id=external_turn_id,
+                        status=status,
+                    )
+                if self._ownership.get(thread_id) is Ownership.reconciling:
+                    self._ownership.pop(thread_id, None)
+                if not self._draining:
+                    self._trigger_dispatch(thread_id)
 
     async def startup(self) -> None:
         for thread_id in self.store.queued_thread_ids():
@@ -91,11 +237,13 @@ class ThreadManager:
             set(self.store.managed_thread_ids())
             | set(self._pty_counts)
             | set(handles_by_thread)
+            | set(self._external_turns)
         )
         interrupted: set[str] = set()
         if thread_ids:
             async def interrupt_authoritative(thread_id: str) -> tuple[str, bool]:
                 try:
+                    await self._require_thread_access(thread_id)
                     turn_id = await self.adapter.interrupt_active_turn(thread_id)
                     return thread_id, turn_id is not None
                 except BaseException:
@@ -164,6 +312,48 @@ class ThreadManager:
         except (OSError, ValueError) as exc:
             raise ConsoleError("invalid_turn_options", str(exc)) from exc
 
+    def _control_scope(
+        self, metadata: Mapping[str, Any]
+    ) -> tuple[bool, str | None]:
+        cwd = metadata.get("cwd")
+        if not isinstance(cwd, (str, Path)):
+            return False, "thread has no usable working directory"
+        try:
+            self.settings.validate_cwd(cwd)
+        except (OSError, ValueError):
+            return (
+                False,
+                f"thread is outside the configured workspace "
+                f"{self.settings.workspace_root}",
+            )
+        return True, None
+
+    async def _require_thread_access(
+        self,
+        thread_id: str,
+        *,
+        archived: bool = False,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resolved: dict[str, Any]
+        if metadata is not None:
+            resolved = dict(metadata)
+        else:
+            # A transport/read failure must not be mistaken for permission.
+            # Local metadata is sufficient for rendering a degraded snapshot,
+            # but never for authorizing a mutation.
+            resolved = await self.adapter.read_thread(
+                thread_id, archived=archived
+            )
+        controllable, reason = self._control_scope(resolved)
+        if not controllable:
+            raise ConsoleError(
+                "thread_outside_workspace",
+                reason or "thread is outside the configured workspace",
+                status=403,
+            )
+        return resolved
+
     async def _serialize_mutation(
         self,
         thread_id: str,
@@ -226,6 +416,9 @@ class ThreadManager:
         for row in rows:
             row.setdefault("draft", False)
             row.setdefault("created_here", False)
+            controllable, control_reason = self._control_scope(row)
+            row["controllable"] = controllable
+            row["control_reason"] = control_reason
             row["ownership"] = self._mode(row["id"]).value
             row["terminal_attached"] = self._pty_counts[row["id"]] > 0
             row["queue_open"] = self.store.open_count(row["id"])
@@ -242,6 +435,8 @@ class ThreadManager:
         row = await self.adapter.create_thread(str(safe_cwd), name)
         self.store.register_thread(row["id"], row["cwd"], name)
         row["draft"] = True
+        row["controllable"] = True
+        row["control_reason"] = None
         row["ownership"] = Ownership.idle.value
         row["terminal_attached"] = False
         row["queue_open"] = 0
@@ -287,8 +482,11 @@ class ThreadManager:
                 "archived": bool(managed["archived"]),
                 "draft": bool(managed["draft"]),
             }
+        controllable, control_reason = self._control_scope(metadata)
         return {
             "thread": metadata,
+            "controllable": controllable,
+            "control_reason": control_reason,
             "ownership": self._mode(thread_id).value,
             "terminal_attached": self._pty_counts[thread_id] > 0,
             "queue": self.store.list(thread_id, open_only=True),
@@ -304,6 +502,7 @@ class ThreadManager:
     async def _rename(self, thread_id: str, name: str) -> dict[str, Any]:
         self._ensure_serving()
         async with self._locks[thread_id]:
+            await self._require_thread_access(thread_id)
             self._require_not_archived(thread_id)
             self._require_idle(thread_id)
             await self._require_authoritative_idle(thread_id, "rename")
@@ -322,6 +521,7 @@ class ThreadManager:
     async def _archive(self, thread_id: str) -> dict[str, Any]:
         self._ensure_serving()
         async with self._locks[thread_id]:
+            await self._require_thread_access(thread_id)
             self._require_idle(thread_id)
             await self._require_authoritative_idle(thread_id, "archive")
             if self.store.open_count(thread_id):
@@ -350,8 +550,12 @@ class ThreadManager:
     async def _delete(self, thread_id: str) -> dict[str, Any]:
         self._ensure_serving()
         async with self._locks[thread_id]:
-            self._require_idle(thread_id)
             managed = self.store.get_managed(thread_id)
+            await self._require_thread_access(
+                thread_id,
+                archived=bool(managed and managed["archived"]),
+            )
+            self._require_idle(thread_id)
             if not managed or not managed["archived"]:
                 await self._require_authoritative_idle(thread_id, "delete")
             await self.adapter.delete_thread(thread_id)
@@ -372,6 +576,7 @@ class ThreadManager:
     async def _restore(self, thread_id: str) -> dict[str, Any]:
         self._ensure_serving()
         async with self._locks[thread_id]:
+            await self._require_thread_access(thread_id, archived=True)
             self._require_idle(thread_id)
             managed = self.store.get_managed(thread_id)
             if managed and managed["draft"]:
@@ -469,6 +674,7 @@ class ThreadManager:
             raise ConsoleError("empty_message", "message cannot be empty")
         turn_options = self._validate_turn_options(options)
         async with self._locks[thread_id]:
+            await self._require_thread_access(thread_id)
             self._require_not_archived(thread_id)
             if self.store.open_count(thread_id):
                 return self._enqueue_deferred_send(
@@ -488,6 +694,7 @@ class ThreadManager:
             async with self._start_lock:
                 if self._draining:
                     self._ensure_serving()
+                self._sdk_starting.add(thread_id)
                 try:
                     handle = await asyncio.wait_for(
                         self.adapter.start_turn(
@@ -496,6 +703,7 @@ class ThreadManager:
                         timeout=self.start_timeout,
                     )
                 except BaseException as exc:
+                    self._finish_sdk_start(thread_id, None)
                     self._ownership[thread_id] = Ownership.reconciling
                     self._schedule_dispatch_retry(thread_id)
                     raise ConsoleError(
@@ -503,6 +711,8 @@ class ThreadManager:
                         f"Codex may have accepted the message; reconciliation required: {exc}",
                         status=502,
                     ) from exc
+                else:
+                    self._finish_sdk_start(thread_id, handle.id)
                 if self._draining:
                     try:
                         await asyncio.wait_for(handle.interrupt(), timeout=5)
@@ -552,6 +762,7 @@ class ThreadManager:
         if not body.strip():
             raise ConsoleError("empty_message", "message cannot be empty")
         async with self._locks[thread_id]:
+            await self._require_thread_access(thread_id)
             if self._mode(thread_id) is Ownership.sdk_turn:
                 handle = self._handles[thread_id]
                 turn_id = handle.id
@@ -587,6 +798,7 @@ class ThreadManager:
 
     async def _interrupt(self, thread_id: str) -> dict[str, Any]:
         async with self._locks[thread_id]:
+            await self._require_thread_access(thread_id)
             if self._mode(thread_id) is Ownership.sdk_turn:
                 handle = self._handles[thread_id]
                 turn_id = handle.id
@@ -624,6 +836,7 @@ class ThreadManager:
             raise ConsoleError("empty_message", "message cannot be empty")
         turn_options = self._validate_turn_options(options)
         async with self._locks[thread_id]:
+            await self._require_thread_access(thread_id)
             self._require_not_archived(thread_id)
             await self.adapter.read_thread(thread_id)
             item = self.store.enqueue(thread_id, body, turn_options)
@@ -636,6 +849,17 @@ class ThreadManager:
             return
         async with self._locks[thread_id]:
             if self._draining:
+                return
+            try:
+                await self._require_thread_access(thread_id)
+            except ConsoleError as exc:
+                if exc.code != "thread_outside_workspace":
+                    self._ownership[thread_id] = Ownership.reconciling
+                    self._schedule_dispatch_retry(thread_id)
+                return
+            except BaseException:
+                self._ownership[thread_id] = Ownership.reconciling
+                self._schedule_dispatch_retry(thread_id)
                 return
             mode = self._mode(thread_id)
             if mode is Ownership.reconciling:
@@ -668,6 +892,7 @@ class ThreadManager:
                         int(item["id"]), "indeterminate", "server shutdown during dispatch"
                     )
                     return
+                self._sdk_starting.add(thread_id)
                 try:
                     handle = await asyncio.wait_for(
                         self.adapter.start_turn(
@@ -680,6 +905,7 @@ class ThreadManager:
                     self.store.update_managed(thread_id, draft=0)
                     self.store.set_turn_id(int(item["id"]), handle.id)
                 except BaseException as exc:
+                    self._finish_sdk_start(thread_id, None)
                     self.store.finish(int(item["id"]), "indeterminate", str(exc))
                     self._ownership[thread_id] = Ownership.reconciling
                     self._publish(
@@ -689,6 +915,8 @@ class ThreadManager:
                         error=str(exc),
                     )
                     return
+                else:
+                    self._finish_sdk_start(thread_id, handle.id)
                 if self._draining:
                     try:
                         await asyncio.wait_for(handle.interrupt(), timeout=5)
@@ -715,6 +943,8 @@ class ThreadManager:
         queue_id: int | None,
         options: TurnOptions,
     ) -> None:
+        self._external_turns.pop(thread_id, None)
+        self._pending_app_server_starts.pop(thread_id, None)
         self._ownership[thread_id] = Ownership.sdk_turn
         self._handles[thread_id] = handle
         task = asyncio.create_task(self._run_handle(thread_id, handle, queue_id))
@@ -771,11 +1001,8 @@ class ThreadManager:
         self._ensure_serving()
         async with self._locks[thread_id]:
             self._require_not_archived(thread_id)
-            metadata = await self.adapter.read_thread(thread_id)
-            try:
-                cwd = self.settings.validate_cwd(Path(metadata["cwd"]))
-            except (OSError, ValueError) as exc:
-                raise ConsoleError("invalid_thread_cwd", str(exc)) from exc
+            metadata = await self._require_thread_access(thread_id)
+            cwd = self.settings.validate_cwd(Path(metadata["cwd"]))
             if self.store.get_managed(thread_id):
                 # An empty SDK-created thread can be resumed directly by the CLI.
                 # From this point on it must be archived through Codex, not treated
@@ -810,6 +1037,8 @@ class ThreadManager:
         )
 
     async def _cancel_queue(self, item_id: int) -> dict[str, Any]:
+        existing = self.store.get(item_id)
+        await self._require_thread_access(str(existing["thread_id"]))
         item = self.store.cancel(item_id)
         self._publish("queue_cancelled", item=item)
         return item
@@ -823,6 +1052,8 @@ class ThreadManager:
         )
 
     async def _retry_queue(self, item_id: int) -> dict[str, Any]:
+        existing = self.store.get(item_id)
+        await self._require_thread_access(str(existing["thread_id"]))
         item = self.store.retry(item_id)
         self._publish("queue_retried", item=item)
         self._trigger_dispatch(str(item["thread_id"]))

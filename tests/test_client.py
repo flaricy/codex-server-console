@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import pytest
+import websockets
 
 from codex_thread_console.client import (
     AsyncConsoleClient,
@@ -15,11 +16,14 @@ from codex_thread_console.client import (
 
 
 class FakeEventSocket:
-    def __init__(self, events: list[dict[str, object]]) -> None:
+    def __init__(self, events: list[dict[str, object] | BaseException]) -> None:
         self.events = list(events)
 
     async def recv(self) -> str:
-        return json.dumps(self.events.pop(0))
+        event = self.events.pop(0)
+        if isinstance(event, BaseException):
+            raise event
+        return json.dumps(event)
 
 
 class FakeEventClient(AsyncConsoleClient):
@@ -36,6 +40,25 @@ class FakeEventClient(AsyncConsoleClient):
     async def _event_connection(self, since_event_id=None):
         self.since_event_id = since_event_id
         yield self.fake_socket
+
+
+class SequencedFakeEventClient(FakeEventClient):
+    def __init__(
+        self,
+        event_batches: list[list[dict[str, object] | BaseException]],
+        *,
+        transport: httpx.AsyncBaseTransport,
+    ) -> None:
+        super().__init__([], transport=transport)
+        self.fake_sockets = [
+            FakeEventSocket(events) for events in event_batches
+        ]
+        self.connection_cursors: list[int | None] = []
+
+    @asynccontextmanager
+    async def _event_connection(self, since_event_id=None):
+        self.connection_cursors.append(since_event_id)
+        yield self.fake_sockets.pop(0)
 
 
 @pytest.mark.asyncio
@@ -150,6 +173,7 @@ async def test_send_and_wait_returns_matching_final_response() -> None:
         )
 
     events = [
+        {"type": "event_stream_ready", "latest_event_id": 0},
         {"type": "heartbeat"},
         {
             "type": "turn_finished",
@@ -188,6 +212,7 @@ async def test_send_and_wait_follows_queued_turn() -> None:
         )
 
     events = [
+        {"type": "event_stream_ready", "latest_event_id": 0},
         {
             "type": "turn_started",
             "thread_id": "thread-1",
@@ -267,6 +292,10 @@ async def test_send_and_wait_reports_event_stream_gap() -> None:
     async with FakeEventClient(
         [
             {
+                "type": "event_stream_ready",
+                "latest_event_id": 0,
+            },
+            {
                 "type": "resync_required",
                 "reason": "subscriber_overflow",
                 "latest_event_id": 900,
@@ -278,3 +307,121 @@ async def test_send_and_wait_reports_event_stream_gap() -> None:
             await client.send_and_wait("thread-1", "work")
 
     assert caught.value.code == "event_stream_gap"
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_replays_after_event_disconnect() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/messages/send")
+        return httpx.Response(
+            200,
+            json={
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "state": "running",
+            },
+        )
+
+    async with SequencedFakeEventClient(
+        [
+            [
+                {"type": "event_stream_ready", "latest_event_id": 10},
+                websockets.ConnectionClosedOK(None, None),
+            ],
+            [
+                {
+                    "type": "turn_finished",
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "final_response": "replayed",
+                    "error": None,
+                    "event_id": 11,
+                }
+            ],
+        ],
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        outcome = await client.send_and_wait("thread-1", "work")
+
+    assert outcome.final_response == "replayed"
+    assert client.connection_cursors == [None, 10]
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_reconnects_before_sending_if_not_ready() -> None:
+    requests = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        assert request.url.path.endswith("/messages/send")
+        return httpx.Response(
+            200,
+            json={
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "state": "running",
+            },
+        )
+
+    async with SequencedFakeEventClient(
+        [
+            [websockets.ConnectionClosedOK(None, None)],
+            [
+                {"type": "event_stream_ready", "latest_event_id": 20},
+                {
+                    "type": "turn_finished",
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "final_response": "done",
+                    "error": None,
+                    "event_id": 21,
+                },
+            ],
+        ],
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        outcome = await client.send_and_wait("thread-1", "work")
+
+    assert outcome.final_response == "done"
+    assert requests == 1
+    assert client.connection_cursors == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_events_resume_from_last_delivered_cursor() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("HTTP should not be used")
+
+    async with SequencedFakeEventClient(
+        [
+            [
+                {"type": "event_stream_ready", "latest_event_id": 3},
+                {
+                    "type": "turn_started",
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "event_id": 4,
+                },
+                websockets.ConnectionClosedOK(None, None),
+            ],
+            [
+                {"type": "event_stream_ready", "latest_event_id": 4},
+                {
+                    "type": "turn_finished",
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "event_id": 5,
+                },
+            ],
+        ],
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        stream = client.events(reconnect_delay=0)
+        assert (await anext(stream))["type"] == "event_stream_ready"
+        assert (await anext(stream))["event_id"] == 4
+        assert (await anext(stream))["type"] == "event_stream_ready"
+        assert (await anext(stream))["event_id"] == 5
+        await stream.aclose()
+
+    assert client.connection_cursors == [None, 4]

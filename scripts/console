@@ -2,7 +2,6 @@
 set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-workspace=${1:-"$PWD"}
 python_bin="$project_root/.venv/bin/python"
 
 if [ ! -x "$python_bin" ] ||
@@ -12,5 +11,4 @@ then
   exit 2
 fi
 
-exec "$python_bin" -m codex_thread_console.app \
-  --workspace "$workspace"
+exec "$python_bin" -m codex_thread_console.cli "$@"

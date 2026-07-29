@@ -134,6 +134,83 @@ async def test_steer_and_interrupt_tui_originated_turn(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_app_server_events_track_external_turn_and_release_queue(
+    tmp_path,
+) -> None:
+    manager, adapter = make_manager(tmp_path)
+    thread = await manager.create_thread(None, "demo")
+    external = adapter.add_external_turn(thread["id"])
+    manager.observe_app_server_notification(
+        {
+            "method": "turn/started",
+            "params": {
+                "threadId": thread["id"],
+                "turn": {
+                    "id": external.id,
+                    "status": "inProgress",
+                },
+            },
+        }
+    )
+
+    assert manager._mode(thread["id"]) is Ownership.external_turn
+    queued = await manager.queue(thread["id"], "after TUI")
+    await asyncio.sleep(0)
+    assert queued["state"] == "queued"
+    assert adapter.turn_options == []
+
+    adapter.active_turn_ids.pop(thread["id"], None)
+    adapter.rows[thread["id"]]["status"] = "idle"
+    external.done.set()
+    manager.observe_app_server_notification(
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": thread["id"],
+                "turn": {
+                    "id": external.id,
+                    "status": "completed",
+                },
+            },
+        }
+    )
+    for _ in range(40):
+        if manager._mode(thread["id"]) is Ownership.sdk_turn:
+            break
+        await asyncio.sleep(0)
+
+    assert adapter.turn_options == [{}]
+    assert manager._mode(thread["id"]) is Ownership.sdk_turn
+    adapter.turns[-1].done.set()
+    await asyncio.wait_for(manager._tasks[thread["id"]], timeout=1)
+    await manager.shutdown()
+    manager.store.close()
+
+
+def test_sdk_started_notification_is_not_misclassified_as_external(
+    tmp_path,
+) -> None:
+    manager, _adapter = make_manager(tmp_path)
+    thread_id = "thread-1"
+    manager._sdk_starting.add(thread_id)
+
+    manager.observe_app_server_notification(
+        {
+            "method": "turn/started",
+            "params": {
+                "threadId": thread_id,
+                "turn": {"id": "sdk-turn"},
+            },
+        }
+    )
+    manager._finish_sdk_start(thread_id, "sdk-turn")
+
+    assert thread_id not in manager._external_turns
+    assert manager._mode(thread_id) is Ownership.idle
+    manager.store.close()
+
+
+@pytest.mark.asyncio
 async def test_last_pty_detach_leaves_tui_originated_turn_running(tmp_path) -> None:
     manager, adapter = make_manager(tmp_path)
     thread = await manager.create_thread(None, "demo")
@@ -326,6 +403,82 @@ async def test_thread_list_includes_app_server_domain_by_default(tmp_path) -> No
 
     created_here = await manager.list_threads(created_here_only=True)
     assert [row["id"] for row in created_here] == [managed["id"]]
+    manager.store.close()
+
+
+@pytest.mark.asyncio
+async def test_outside_workspace_threads_are_inspect_only(tmp_path) -> None:
+    manager, adapter = make_manager(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    adapter.rows["outside-thread"] = {
+        "id": "outside-thread",
+        "name": "outside",
+        "preview": "",
+        "cwd": str(outside),
+        "status": "idle",
+        "archived": False,
+    }
+
+    row = (await manager.list_threads())[0]
+    assert row["controllable"] is False
+    assert "outside the configured workspace" in row["control_reason"]
+    status = await manager.status("outside-thread")
+    assert status["controllable"] is False
+
+    operations = [
+        manager.rename("outside-thread", "renamed"),
+        manager.archive("outside-thread"),
+        manager.delete("outside-thread"),
+        manager.send("outside-thread", "work"),
+        manager.queue("outside-thread", "later"),
+        manager.steer("outside-thread", "redirect"),
+        manager.interrupt("outside-thread"),
+        manager.reserve_pty("outside-thread"),
+        manager.restore("outside-thread"),
+    ]
+    for operation in operations:
+        with pytest.raises(ConsoleError) as caught:
+            await operation
+        assert caught.value.code == "thread_outside_workspace"
+        assert caught.value.status == 403
+
+    assert adapter.rows["outside-thread"]["name"] == "outside"
+    assert adapter.turns == []
+    assert manager.store.list("outside-thread") == []
+    await manager.shutdown()
+    manager.store.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_actions_follow_current_workspace_scope(tmp_path) -> None:
+    manager, adapter = make_manager(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    adapter.rows["outside-thread"] = {
+        "id": "outside-thread",
+        "name": "outside",
+        "preview": "",
+        "cwd": str(outside),
+        "status": "idle",
+        "archived": False,
+    }
+    queued = manager.store.enqueue("outside-thread", "do not dispatch")
+    claimed = manager.store.claim_next("outside-thread")
+    assert claimed is not None
+    manager.store.finish(queued["id"], "indeterminate", "scope changed")
+
+    for operation in (
+        manager.cancel_queue(queued["id"]),
+        manager.retry_queue(queued["id"]),
+    ):
+        with pytest.raises(ConsoleError) as caught:
+            await operation
+        assert caught.value.code == "thread_outside_workspace"
+        assert caught.value.status == 403
+
+    assert manager.store.get(queued["id"])["state"] == "indeterminate"
+    await manager.shutdown()
     manager.store.close()
 
 

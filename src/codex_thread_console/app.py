@@ -112,6 +112,7 @@ def create_app(
         store = QueueStore(settings.database_path)
         events = EventBroker()
         manager: ThreadManager | None = None
+        notification_task: asyncio.Task[None] | None = None
         try:
             if codex is None:
                 runtime = AppServerRuntime(
@@ -123,11 +124,28 @@ def create_app(
             app.state.settings = settings
             app.state.manager = manager
             app.state.app_server_runtime = runtime
+            if runtime is not None:
+                async def forward_notifications() -> None:
+                    while True:
+                        notification = await runtime.next_notification()
+                        manager.observe_app_server_notification(notification)
+
+                notification_task = asyncio.create_task(
+                    forward_notifications(),
+                    name="codex-app-server-notifications",
+                )
+                app.state.notification_task = notification_task
             await codex.start()
             await manager.startup()
             yield
         finally:
             cleanup_errors: list[BaseException] = []
+            if notification_task is not None:
+                notification_task.cancel()
+                await asyncio.gather(
+                    notification_task,
+                    return_exceptions=True,
+                )
             if manager is not None:
                 try:
                     await manager.shutdown()
@@ -203,6 +221,9 @@ def create_app(
         runtime: AppServerRuntime | None = getattr(
             request.app.state, "app_server_runtime", None
         )
+        notification_task: asyncio.Task[None] | None = getattr(
+            request.app.state, "notification_task", None
+        )
         return {
             "ok": True,
             "sdk": f"openai-codex {sdk_version}",
@@ -215,6 +236,28 @@ def create_app(
             ),
             "app_server_binary_source": (
                 runtime.codex_bin_source if runtime is not None else "test-adapter"
+            ),
+            "notification_tap": (
+                {
+                    "clients": runtime.notification_tap_clients,
+                    "status": (
+                        "connected"
+                        if runtime.notification_tap_clients
+                        else "waiting"
+                    ),
+                    "consumer": (
+                        "running"
+                        if notification_task is not None
+                        and not notification_task.done()
+                        else "stopped"
+                    ),
+                }
+                if runtime is not None
+                else {
+                    "clients": 0,
+                    "status": "test-adapter",
+                    "consumer": "test-adapter",
+                }
             ),
             "mutation_ordering": "fifo_per_thread",
             "background_policy": "deny_all/read_only",

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import json
 import os
+import secrets
 import signal
 import shutil
 import socket
 import sys
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 from codex_cli_bin import bundled_codex_path
 from openai_codex import CodexConfig
@@ -74,6 +78,13 @@ class AppServerRuntime:
         self.process: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_tail: deque[str] = deque(maxlen=100)
+        self.tap_port: int | None = None
+        self._tap_token = secrets.token_urlsafe(32)
+        self._tap_server: asyncio.AbstractServer | None = None
+        self._tap_writers: set[asyncio.StreamWriter] = set()
+        self._notification_queue: asyncio.Queue[dict[str, Any]] = (
+            asyncio.Queue(maxsize=2048)
+        )
 
     @property
     def remote_url(self) -> str:
@@ -83,15 +94,28 @@ class AppServerRuntime:
 
     @property
     def proxy_args(self) -> tuple[str, ...]:
-        return (
+        args = (
             sys.executable,
             "-m",
             "codex_thread_console.ws_stdio_proxy",
             self.remote_url,
         )
+        if self.tap_port is not None:
+            return (*args, str(self.tap_port))
+        return args
 
     def sdk_config(self) -> CodexConfig:
-        return CodexConfig(launch_args_override=self.proxy_args)
+        return CodexConfig(
+            launch_args_override=self.proxy_args,
+            env={"CODEX_CONSOLE_TAP_TOKEN": self._tap_token},
+        )
+
+    @property
+    def notification_tap_clients(self) -> int:
+        return len(self._tap_writers)
+
+    async def next_notification(self) -> dict[str, Any]:
+        return await self._notification_queue.get()
 
     async def start(self) -> None:
         if self.process is not None:
@@ -102,6 +126,7 @@ class AppServerRuntime:
             )
         self.codex_version = await self._read_codex_version()
         self.runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        await self._start_notification_tap()
         self.port = self._allocate_loopback_port()
         self.process = await asyncio.create_subprocess_exec(
             str(self.codex_bin),
@@ -176,11 +201,91 @@ class AppServerRuntime:
         if self._stderr_task is not None:
             await asyncio.gather(self._stderr_task, return_exceptions=True)
             self._stderr_task = None
+        await self._close_notification_tap()
         try:
             self.endpoint_path.unlink()
         except FileNotFoundError:
             pass
         self.port = None
+
+    async def _start_notification_tap(self) -> None:
+        if self._tap_server is not None:
+            return
+        self._tap_server = await asyncio.start_server(
+            self._handle_notification_tap,
+            "127.0.0.1",
+            0,
+            limit=256 * 1024,
+        )
+        socket_info = self._tap_server.sockets
+        if not socket_info:
+            raise RuntimeError("notification tap did not bind a socket")
+        self.tap_port = int(socket_info[0].getsockname()[1])
+
+    async def _close_notification_tap(self) -> None:
+        server = self._tap_server
+        self._tap_server = None
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+        writers = tuple(self._tap_writers)
+        self._tap_writers.clear()
+        for writer in writers:
+            writer.close()
+        if writers:
+            await asyncio.gather(
+                *(writer.wait_closed() for writer in writers),
+                return_exceptions=True,
+            )
+        self.tap_port = None
+
+    async def _handle_notification_tap(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            raw_token = await asyncio.wait_for(reader.readline(), timeout=2)
+            token = raw_token.decode("utf-8", errors="replace").rstrip("\n")
+            if not hmac.compare_digest(token, self._tap_token):
+                return
+            self._tap_writers.add(writer)
+            while line := await reader.readline():
+                try:
+                    notification = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    not isinstance(notification, dict)
+                    or not isinstance(notification.get("method"), str)
+                    or not isinstance(notification.get("params"), dict)
+                ):
+                    continue
+                try:
+                    self._notification_queue.put_nowait(notification)
+                except asyncio.QueueFull:
+                    while not self._notification_queue.empty():
+                        self._notification_queue.get_nowait()
+                    self._notification_queue.put_nowait(
+                        {
+                            "method": "tap/resync_required",
+                            "params": {"reason": "notification_overflow"},
+                        }
+                    )
+        except (
+            asyncio.IncompleteReadError,
+            ConnectionError,
+            OSError,
+            ValueError,
+        ):
+            return
+        finally:
+            self._tap_writers.discard(writer)
+            writer.close()
+            await asyncio.gather(
+                writer.wait_closed(),
+                return_exceptions=True,
+            )
 
     async def _drain_stderr(self) -> None:
         process = self.process

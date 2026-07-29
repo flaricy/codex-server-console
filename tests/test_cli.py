@@ -109,11 +109,14 @@ def test_human_thread_list_is_compact() -> None:
                     "status": "active",
                     "queue_open": 2,
                     "created_here": False,
+                    "controllable": False,
                 },
             ]
         }
     )
 
     assert "STATUS" in rendered
+    assert "SCOPE" in rendered
+    assert "inspect" in rendered
     assert "workflow" in rendered
     assert "existing session" in rendered

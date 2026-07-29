@@ -58,6 +58,7 @@ Python workflows ─ HTTP/WS ────>│  ├─ typed async workflow clien
                                 │       │ stdio                        │
                                 │       v                              │
                                 │     WS stdio proxy ───────┐          │
+                                │       └─ lifecycle tap ──>│ manager  │
                                 └───────────────────────────┼──────────┘
                                                             v
                                                   shared Codex app-server
@@ -70,6 +71,12 @@ Browser xterm <─ terminal WS <──│ PTY: codex --remote ... resume ...   �
 The backend owns the app-server lifecycle. It binds to a dynamically allocated
 loopback port, writes the endpoint to the mode-`0600` runtime directory, and removes
 the endpoint when it shuts down.
+
+The SDK router only owns turns that the SDK itself starts. App-server notifications
+for a TUI-originated turn would otherwise be buffered and discarded because no SDK
+turn handle is registered. The proxy therefore copies a bounded allowlist of
+start/completion/status notifications to an authenticated loopback tap. Full item
+payloads and high-volume deltas remain exclusively on the SDK connection.
 
 The browser never receives the app-server endpoint and never speaks its RPC
 protocol directly. It receives PTY bytes from a specifically spawned remote Codex
@@ -114,9 +121,9 @@ it does not claim distributed exactly-once delivery.
 The controller tracks only states it must supervise:
 
 ```text
-IDLE ── turn.start ──> SDK_TURN ── completed/interrupted ──> IDLE
-  ^                         |
-  └──── confirmed idle <────┘
+IDLE ── SDK start ──> SDK_TURN ── completed/interrupted ──> IDLE
+  │
+  └── TUI start ───> EXTERNAL_TURN ── app-server completed ─> IDLE
 
 RECONCILING ── confirmed idle ──> IDLE
 ```
@@ -135,6 +142,11 @@ ran independent local app-server processes.
 `steer` and typed `interrupt` resolve the authoritative active turn from
 app-server and construct an SDK handle for that `threadId`/`turnId` pair. They
 therefore also control a turn started manually inside the attached TUI.
+
+Threads whose working directories fall outside the configured workspace are part
+of the visible app-server history but have no control capability. The API labels
+them `controllable: false`; all mutation paths enforce the same boundary before
+calling the SDK.
 
 ## 6. Commands and HTTP surface
 
@@ -211,6 +223,10 @@ outside that window, or one from a previous server process, receives an explicit
 receive `event_stream_ready` after all available replay frames. This prevents a
 quiet disconnect from turning into silent stale workflow state.
 
+The async workflow client reconnects from its last delivered cursor. `send_and_wait`
+waits for `event_stream_ready` before publishing the HTTP mutation, so the
+subscription exists before `turn_started` can be emitted.
+
 ## 8. Terminal protocol
 
 The terminal WebSocket carries:
@@ -246,6 +262,8 @@ two PTYs alive or mixing stale output into the current xterm.
 - The adjacent Queue inspector is scoped to the selected thread, displays the
   options persisted with every item, and exposes only valid cancel/retry actions
   for its current durable state.
+- Out-of-workspace history is labeled `inspect only`; attach and every composer or
+  lifecycle mutation control are disabled.
 
 ## 10. Durable queue
 
@@ -269,6 +287,8 @@ eligible row.
   validation;
 - shell commands require the protected runtime token;
 - working directories must resolve under `CODEX_CONSOLE_WORKSPACE_ROOT`;
+- app-server history outside that root is read-only and every mutation revalidates
+  the authoritative thread working directory;
 - per-turn `cwd` overrides are validated against the same workspace boundary;
 - the app-server endpoint file, token, and SQLite database are mode `0600`;
 - the app-server and SDK proxy are child processes and are terminated on shutdown;
@@ -279,7 +299,7 @@ eligible row.
 - PTY access is equivalent to a local interactive Codex CLI and is intended only
   for a trusted local user.
 
-## 11. Verification
+## 12. Verification
 
 Automated tests cover:
 
@@ -290,6 +310,9 @@ Automated tests cover:
 - shared PTY attachment during an SDK turn;
 - FIFO mutation order per thread;
 - concurrency across different threads.
+- TUI-originated lifecycle reconciliation and queued-turn release;
+- reconnect/replay behavior for workflow event consumers;
+- inspect-only enforcement for out-of-workspace history.
 
 The real smoke test additionally verifies:
 
@@ -299,7 +322,7 @@ The real smoke test additionally verifies:
 - Web interrupt appears as `Conversation interrupted`;
 - returned mutation sequences increase in arrival order.
 
-## 12. Non-goals
+## 13. Non-goals
 
 - multi-user hosting or multiple backend replicas;
 - distributed transactions between SQLite and Codex;
