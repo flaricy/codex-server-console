@@ -99,13 +99,17 @@
 
         <aside class="activity">
           <div class="panel-title">
-            <span>Activity</span>
+            <div class="inspector-tabs">
+              <button id="show-activity" class="inspector-tab active">Activity</button>
+              <button id="show-queue" class="inspector-tab">Queue</button>
+            </div>
             <div class="activity-controls">
               <span id="event-status" class="event-status">Connecting</span>
               <button id="clear-log" class="icon" title="Clear activity">×</button>
             </div>
           </div>
           <div id="activity-list" role="log" aria-live="polite"></div>
+          <div id="queue-list" hidden></div>
         </aside>
       </main>
     </div>

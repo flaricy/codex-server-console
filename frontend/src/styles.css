@@ -126,6 +126,19 @@ aside, .workspace { min-height: 0; background: var(--panel); }
 }
 .turn-options-grid .schema-field { grid-column: 1 / -1; }
 .activity-controls { display: flex; align-items: center; gap: 7px; }
+.inspector-tabs { display: flex; gap: 3px; }
+.inspector-tab {
+  padding: 4px 7px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+.inspector-tab.active {
+  color: #e0f2fe;
+  border-color: #334155;
+  background: #17202a;
+}
 .event-status {
   color: #fde68a;
   font: 9px ui-monospace, monospace;
@@ -138,6 +151,56 @@ aside, .workspace { min-height: 0; background: var(--panel); }
   height: calc(100% - 30px);
   overflow: auto;
 }
+#queue-list {
+  height: calc(100% - 30px);
+  overflow: auto;
+}
+.queue-empty {
+  color: #64748b;
+  font: 10px/1.5 ui-monospace, monospace;
+  padding: 12px 3px;
+}
+.queue-item {
+  margin-bottom: 7px;
+  padding: 8px;
+  border: 1px solid #27313d;
+  border-radius: 5px;
+  background: #0e1217;
+  color: #aab3bf;
+  font: 10px/1.45 ui-monospace, monospace;
+}
+.queue-item header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.queue-state { color: #7dd3fc; text-transform: uppercase; }
+.queue-item p {
+  margin: 6px 0;
+  max-height: 72px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.queue-item details { color: #64748b; }
+.queue-item pre {
+  margin: 5px 0 0;
+  max-height: 100px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+}
+.queue-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  margin-top: 7px;
+}
+.queue-actions button { padding: 4px 7px; font-size: 10px; }
 .activity-item {
   border-left: 2px solid #334155;
   padding: 7px 8px;

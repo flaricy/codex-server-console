@@ -243,6 +243,9 @@ two PTYs alive or mixing stale output into the current xterm.
 - Direct keyboard interaction with the remote TUI remains available.
 - Activity is a bounded structured event list. Its Live/Re-syncing/Offline state
   reflects WebSocket continuity; mutation entries retain sequence numbers.
+- The adjacent Queue inspector is scoped to the selected thread, displays the
+  options persisted with every item, and exposes only valid cancel/retry actions
+  for its current durable state.
 
 ## 10. Durable queue
 

@@ -5,7 +5,9 @@ import "./styles.css";
 
 const state = {
   threads: [],
+  queue: [],
   selected: null,
+  inspector: "activity",
   terminalSocket: null,
   terminalThreadId: null,
   terminalConnectPromise: null,
@@ -223,6 +225,110 @@ function renderThreads() {
   }
 }
 
+function setInspector(name) {
+  state.inspector = name;
+  const activity = name === "activity";
+  $("#activity-list").hidden = !activity;
+  $("#queue-list").hidden = activity;
+  $("#show-activity").classList.toggle("active", activity);
+  $("#show-queue").classList.toggle("active", !activity);
+  $("#event-status").hidden = !activity;
+  $("#clear-log").hidden = !activity;
+  if (!activity) void refreshQueue();
+}
+
+function renderQueue() {
+  const list = $("#queue-list");
+  list.replaceChildren();
+  if (!state.selected) {
+    const empty = document.createElement("p");
+    empty.className = "queue-empty";
+    empty.textContent = "Select a thread to inspect its queue.";
+    list.append(empty);
+    return;
+  }
+  if (!state.queue.length) {
+    const empty = document.createElement("p");
+    empty.className = "queue-empty";
+    empty.textContent = "No queued messages for this thread.";
+    list.append(empty);
+    return;
+  }
+  for (const queued of state.queue) {
+    const item = document.createElement("article");
+    item.className = "queue-item";
+    const header = document.createElement("header");
+    const stateLabel = document.createElement("span");
+    stateLabel.className = "queue-state";
+    stateLabel.textContent = queued.state;
+    const id = document.createElement("span");
+    id.textContent = `#${queued.id}`;
+    header.append(stateLabel, id);
+    const body = document.createElement("p");
+    body.textContent = queued.body;
+    item.append(header, body);
+    if (queued.options && Object.keys(queued.options).length) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = "Turn options";
+      const options = document.createElement("pre");
+      options.textContent = JSON.stringify(queued.options, null, 2);
+      details.append(summary, options);
+      item.append(details);
+    }
+    if (queued.state === "queued" || queued.state === "indeterminate") {
+      const actions = document.createElement("div");
+      actions.className = "queue-actions";
+      if (queued.state === "indeterminate") {
+        const retry = document.createElement("button");
+        retry.textContent = "Retry";
+        retry.addEventListener("click", async () => {
+          retry.disabled = true;
+          await mutateQueue("POST", queued.id, "retry");
+        });
+        actions.append(retry);
+      }
+      const cancel = document.createElement("button");
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", async () => {
+        cancel.disabled = true;
+        await mutateQueue("DELETE", queued.id);
+      });
+      actions.append(cancel);
+      item.append(actions);
+    }
+    list.append(item);
+  }
+}
+
+async function refreshQueue() {
+  if (!state.selected) {
+    state.queue = [];
+    renderQueue();
+    return;
+  }
+  try {
+    const payload = await api(
+      `/api/queue?thread_id=${encodeURIComponent(state.selected.id)}`,
+    );
+    state.queue = payload.queue;
+    renderQueue();
+  } catch (error) {
+    log("Queue refresh failed", error.message, "error");
+  }
+}
+
+async function mutateQueue(method, itemId, action = "") {
+  try {
+    const suffix = action ? `/${action}` : "";
+    await api(`/api/queue/${itemId}${suffix}`, { method });
+    await refreshQueue();
+    await refresh();
+  } catch (error) {
+    log(`Queue ${action || "cancel"} failed`, error.message, "error");
+  }
+}
+
 function selectThread(thread) {
   state.selected = thread;
   $("#selected-title").textContent = selectedLabel(thread);
@@ -252,6 +358,7 @@ async function chooseThread(thread) {
     await disconnectTerminal();
   }
   selectThread(thread);
+  await refreshQueue();
 }
 
 async function refresh() {
@@ -285,6 +392,7 @@ async function refresh() {
       selectThread(state.threads[0]);
     }
     renderThreads();
+    await refreshQueue();
   } catch (error) {
     log("Refresh failed", error.message, "error");
   } finally {
@@ -593,6 +701,8 @@ $("#submit-message").addEventListener("click", async () => {
 $("#refresh").addEventListener("click", refresh);
 $("#archived").addEventListener("change", refresh);
 $("#created-here").addEventListener("change", refresh);
+$("#show-activity").addEventListener("click", () => setInspector("activity"));
+$("#show-queue").addEventListener("click", () => setInspector("queue"));
 $("#clear-log").addEventListener("click", () => {
   activityElement.replaceChildren();
 });

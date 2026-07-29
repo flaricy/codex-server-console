@@ -226,6 +226,10 @@ official SDK exposes that contract.
 - The debugger loads a REST snapshot before consuming ordered WebSocket deltas.
   Each event has a monotonic `event_id`; reconnects replay a bounded in-memory
   window and explicitly request a new snapshot if continuity cannot be proven.
+- The right-hand inspector separates structured Activity events from the selected
+  thread's durable queue. Queued items expose their persisted turn options;
+  `indeterminate` items can be retried or cancelled without using the raw command
+  endpoint.
 - Selecting a thread is read-only and does not launch a process. **Attach CLI**
   explicitly launches its real remote Codex TUI. A turn started by the shell
   controller or Web composer is rendered live after attachment.
